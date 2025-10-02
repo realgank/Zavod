@@ -100,6 +100,17 @@ confirm() {
     esac
 }
 
+set_env_var() {
+    local key="$1"
+    local value="$2"
+
+    if [[ -f "${ENV_FILE}" ]] && grep -q "^${key}=" "${ENV_FILE}"; then
+        sed -i "s#^${key}=.*#${key}=${value}#" "${ENV_FILE}"
+    else
+        echo "${key}=${value}" >> "${ENV_FILE}"
+    fi
+}
+
 #############################
 # Root / sudo detection
 #############################
@@ -359,6 +370,8 @@ if confirm "Создать systemd сервис для автозапуска?" 
 
     printf '%b' "${SERVICE_CONTENT}" | ${SUDO:-} tee "${SERVICE_FILE}" >/dev/null
     ${SUDO:-} systemctl daemon-reload
+
+    set_env_var "BOT_AUTO_RESTART" "1"
 
     if confirm "Запустить сервис сейчас?" "y"; then
         ${SUDO:-} systemctl enable "${SERVICE_NAME}"
