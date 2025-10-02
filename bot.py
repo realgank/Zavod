@@ -215,6 +215,63 @@ async def _pull_latest_code() -> str:
     return output
 
 
+async def _schedule_process_restart(delay: float) -> None:
+    """Завершить текущий процесс после указанной задержки."""
+
+    await asyncio.sleep(delay)
+    logger.info("Завершение процесса для автоматического перезапуска")
+    os._exit(1)
+
+
+async def _restart_service_if_configured() -> Optional[str]:
+    """Перезапустить сервис, если настроены соответствующие переменные окружения."""
+
+    restart_command = os.getenv("BOT_RESTART_COMMAND")
+    if restart_command:
+        logger.info("Перезапуск бота командой: %s", restart_command)
+        process = await asyncio.create_subprocess_shell(
+            restart_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            error_output = stderr.decode().strip() or stdout.decode().strip()
+            logger.error(
+                "Команда перезапуска завершилась с ошибкой %s: %s",
+                process.returncode,
+                error_output,
+            )
+            raise RuntimeError(
+                error_output
+                or "Команда перезапуска завершилась с ненулевым кодом возврата"
+            )
+        command_output = stdout.decode().strip()
+        if not command_output:
+            command_output = "Команда перезапуска выполнена успешно."
+        logger.info("Перезапуск с помощью команды завершён успешно")
+        return command_output
+
+    if _env_flag("BOT_AUTO_RESTART", default=False):
+        try:
+            delay = float(os.getenv("BOT_AUTO_RESTART_DELAY", "5"))
+        except ValueError:
+            delay = 5.0
+        if delay < 0:
+            delay = 0
+        logger.info(
+            "Настроен автоматический перезапуск после обновления через %s секунд",
+            delay,
+        )
+        asyncio.create_task(_schedule_process_restart(delay))
+        return "Запланирован автоматический перезапуск бота."
+
+    logger.info(
+        "Переменные BOT_RESTART_COMMAND и BOT_AUTO_RESTART не заданы, перезапуск пропущен"
+    )
+    return None
+
+
 @bot.event
 async def setup_hook() -> None:
     logger.info("Запуск setup_hook: подключаюсь к базе данных")
@@ -459,11 +516,18 @@ async def update_bot_command(interaction: discord.Interaction) -> None:
 
     if len(result) > 1900:
         result = result[:1900] + "…"
+    restart_message: Optional[str]
+    try:
+        restart_message = await _restart_service_if_configured()
+    except RuntimeError as exc:
+        logger.warning("Перезапуск после обновления завершился с ошибкой: %s", exc)
+        restart_message = f"Обновление выполнено, но перезапуск не удался: {exc}"
+
     logger.info("Команда update_bot завершилась успешно")
-    await interaction.followup.send(
-        "Успешно обновлено из GitHub. Итог:\n" + result,
-        ephemeral=False,
-    )
+    response_lines = ["Успешно обновлено из GitHub. Итог:", result]
+    if restart_message:
+        response_lines.extend(["", restart_message])
+    await interaction.followup.send("\n".join(response_lines), ephemeral=False)
 
 
 async def _run_bot(token: str) -> None:
