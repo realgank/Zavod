@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+from asyncio import subprocess
 from decimal import Decimal
 from typing import Optional
 
@@ -66,6 +67,24 @@ async def _read_attachment_content(message: discord.Message) -> Optional[str]:
         return data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("Не удалось декодировать вложение как UTF-8 текст") from exc
+
+
+async def _pull_latest_code() -> str:
+    process = await asyncio.create_subprocess_exec(
+        "git",
+        "pull",
+        "--ff-only",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+    if process.returncode != 0:
+        error_output = stderr.decode().strip() or stdout.decode().strip()
+        raise RuntimeError(error_output or "Не удалось выполнить git pull")
+    output = stdout.decode().strip()
+    if not output:
+        output = "Изменений нет"
+    return output
 
 
 @bot.event
@@ -204,6 +223,31 @@ async def global_efficiency_command(ctx: commands.Context) -> None:
 
     value = await database.get_global_efficiency()
     await ctx.send(f"Текущая глобальная эффективность: {value}%")
+
+
+@bot.command(name="update_bot")
+@commands.has_permissions(administrator=True)
+async def update_bot_command(ctx: commands.Context) -> None:
+    """Обновляет код бота из GitHub репозитория."""
+
+    status_message = await ctx.send("Запускаю обновление из GitHub...")
+    try:
+        result = await _pull_latest_code()
+    except FileNotFoundError:
+        await status_message.edit(content="Git не установлен на сервере")
+        return
+    except RuntimeError as exc:
+        message = f"Не удалось обновить бота: {exc}"
+        if len(message) > 1900:
+            message = message[:1900] + "…"
+        await status_message.edit(content=message)
+        return
+
+    if len(result) > 1900:
+        result = result[:1900] + "…"
+    await status_message.edit(
+        content="Успешно обновлено из GitHub. Итог:\n" + result
+    )
 
 
 async def _run_bot(token: str) -> None:
