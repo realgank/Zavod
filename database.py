@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import aiosqlite
 
@@ -28,6 +28,26 @@ class ResourcePriceNotFoundError(RuntimeError):
 
 class CircularRecipeReferenceError(RuntimeError):
     """Raised when recipes reference each other in a cycle."""
+
+
+Migration = Callable[[aiosqlite.Connection], Awaitable[None]]
+
+
+async def _migration_1_initialise_schema_version(conn: aiosqlite.Connection) -> None:
+    """Initial migration that establishes schema version tracking."""
+
+    logger.info("Выполняю миграцию схемы #1: инициализация версии схемы")
+    # Baseline migration does not need to modify existing tables because the
+    # schema is created in ``_initialise_schema`` using idempotent statements.
+    # The presence of this migration ensures that older installations receive a
+    # schema version entry in the config table.
+
+
+MIGRATIONS: dict[int, Migration] = {
+    1: _migration_1_initialise_schema_version,
+}
+
+CURRENT_SCHEMA_VERSION = max(MIGRATIONS.keys(), default=0)
 
 
 class Database:
@@ -98,6 +118,11 @@ class Database:
             )
             return stats
 
+    async def get_schema_version(self) -> int:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+        return await self._get_schema_version(self._conn)
+
     async def _initialise_schema(self, conn: aiosqlite.Connection) -> None:
         logger.debug("Проверяю схему базы данных")
         await conn.executescript(
@@ -133,7 +158,70 @@ class Database:
             "INSERT INTO config(key, value) VALUES(?, ?) ON CONFLICT(key) DO NOTHING",
             ("global_efficiency", "100"),
         )
+        await self._run_migrations(conn)
         logger.debug("Проверка схемы завершена")
+
+    async def _get_schema_version(self, conn: aiosqlite.Connection) -> int:
+        cursor = await conn.execute(
+            "SELECT value FROM config WHERE key = ?",
+            ("schema_version",),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return 0
+        raw_value = row["value"]
+        try:
+            return int(raw_value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Невалидное значение версии схемы '%s', будет использоваться 0",
+                raw_value,
+            )
+            return 0
+
+    async def _set_schema_version(self, conn: aiosqlite.Connection, version: int) -> None:
+        await conn.execute(
+            """
+            INSERT INTO config(key, value) VALUES(?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            ("schema_version", str(version)),
+        )
+
+    async def _run_migrations(self, conn: aiosqlite.Connection) -> None:
+        current_version = await self._get_schema_version(conn)
+        if current_version > CURRENT_SCHEMA_VERSION:
+            raise RuntimeError(
+                "Database schema version %s is newer than supported version %s"
+                % (current_version, CURRENT_SCHEMA_VERSION)
+            )
+        if current_version == CURRENT_SCHEMA_VERSION:
+            logger.debug(
+                "Версия схемы базы данных (%s) актуальна",
+                current_version,
+            )
+            return
+
+        logger.info(
+            "Обновляю схему базы данных с версии %s до %s",
+            current_version,
+            CURRENT_SCHEMA_VERSION,
+        )
+        for next_version in range(current_version + 1, CURRENT_SCHEMA_VERSION + 1):
+            migration = MIGRATIONS.get(next_version)
+            if migration is None:
+                raise RuntimeError(
+                    f"No migration available for schema version {next_version}"
+                )
+            logger.debug("Применяю миграцию #%s", next_version)
+            await migration(conn)
+            await self._set_schema_version(conn, next_version)
+
+        logger.info(
+            "Схема базы данных обновлена до версии %s",
+            CURRENT_SCHEMA_VERSION,
+        )
 
     async def add_recipe(
         self,
