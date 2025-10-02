@@ -484,7 +484,7 @@ class Database:
         if efficiency <= 0:
             raise ValueError("Efficiency must be greater than 0")
 
-        multiplier = Decimal("100") / efficiency
+        multiplier = efficiency / Decimal("100")
         logger.info(
             "Рассчитываю стоимость рецепта '%s' с эффективностью %s", recipe_name, efficiency
         )
