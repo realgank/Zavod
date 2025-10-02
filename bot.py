@@ -98,11 +98,24 @@ def _parse_recipe_table(raw_table: str) -> list[RecipeComponent]:
     lines = [line.strip() for line in raw_table.splitlines() if line.strip()]
     components: list[RecipeComponent] = []
     splitter = re.compile(r"\t|\s{2,}")
+    header_keywords = {
+        "id",
+        "название",
+        "названия",
+        "name",
+        "names",
+        "количество",
+        "quantity",
+        "оценка",
+        "стоимость",
+        "valuation",
+        "cost",
+    }
+
     for line in lines:
         normalised = line.replace("\u200b", "")  # remove zero-width spaces from Discord tables
-        if "названия" in normalised.lower():
-            continue
-        if "id" == normalised.lower():
+        lower_normalised = normalised.lower()
+        if any(keyword in lower_normalised for keyword in header_keywords):
             continue
 
         parts = [part.strip() for part in splitter.split(normalised) if part.strip()]
