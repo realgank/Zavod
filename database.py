@@ -11,6 +11,16 @@ import aiosqlite
 logger = logging.getLogger(__name__)
 
 
+def _escape_like(text: str) -> str:
+    """Escape characters with special meaning in LIKE patterns."""
+
+    return (
+        text.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
+
 @dataclass(frozen=True)
 class RecipeComponent:
     resource_name: str
@@ -61,6 +71,14 @@ class Database:
         """Return the filesystem path of the SQLite database."""
 
         return self._path
+
+    def set_path(self, path: str) -> None:
+        """Update the path used for future database connections."""
+
+        if self._conn is not None:
+            raise RuntimeError("Cannot change database path while connected")
+        logger.info("Обновляю путь к базе данных: %s", path)
+        self._path = path
 
     async def connect(self) -> None:
         if self._conn is not None:
@@ -362,13 +380,6 @@ class Database:
         if limit <= 0:
             return []
 
-        def _escape_like(text: str) -> str:
-            return (
-                text.replace("\\", "\\\\")
-                .replace("%", "\\%")
-                .replace("_", "\\_")
-            )
-
         normalised_query = query.strip()
         pattern = f"%{_escape_like(normalised_query)}%"
 
@@ -394,6 +405,45 @@ class Database:
         names = [row["name"] for row in rows]
         logger.debug(
             "Найдено %s ресурсов по запросу '%s'", len(names), normalised_query
+        )
+        return names
+
+    async def search_recipe_names(
+        self, query: str = "", *, limit: int = 25
+    ) -> list[str]:
+        """Возвращает список рецептов, совпадающих с запросом."""
+
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        if limit <= 0:
+            return []
+
+        normalised_query = query.strip()
+        pattern = f"%{_escape_like(normalised_query)}%"
+
+        logger.debug(
+            "Ищу рецепты по запросу '%s' (ограничение %s)",
+            normalised_query,
+            limit,
+        )
+
+        cursor = await self._conn.execute(
+            """
+            SELECT name
+            FROM recipes
+            WHERE name LIKE ? ESCAPE '\\'
+            ORDER BY name COLLATE NOCASE
+            LIMIT ?
+            """,
+            (pattern, limit),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+        names = [row["name"] for row in rows]
+        logger.debug(
+            "Найдено %s рецептов по запросу '%s'", len(names), normalised_query
         )
         return names
 

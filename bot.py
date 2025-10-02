@@ -513,6 +513,17 @@ async def on_ready() -> None:
             exc,
         )
 
+    log_lines = [
+        "Уведомление о запуске бота.",
+        f"Источник канала: {channel_id_source}",
+    ]
+    log_lines.append(f"Канал уведомления: {channel_id}")
+    if fallback_channel_id_raw is not None:
+        log_lines.append(f"Сохранённый канал: {fallback_channel_id_raw}")
+    log_lines.append("")
+    log_lines.extend(message_lines)
+    await _send_restart_log("\n".join(log_lines))
+
 
 @bot.tree.command(name="add_recipe", description="Добавить или обновить рецепт")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -661,6 +672,17 @@ async def recipe_price_command(
             ]
         )
     )
+
+
+@recipe_price_command.autocomplete("recipe_name")
+async def recipe_price_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    """Автодополнение названий рецептов для команды расчёта цены."""
+
+    del interaction
+    recipe_names = await database.search_recipe_names(current)
+    return [app_commands.Choice(name=name, value=name) for name in recipe_names]
 
 
 @bot.tree.command(name="resource_price", description="Показать цену ресурса")
@@ -826,6 +848,17 @@ async def _run_bot(token: str) -> None:
 def main() -> None:
     env_file = Path(__file__).resolve().parent / ".env"
     _load_env_file(env_file)
+
+    database_path = os.getenv("DATABASE_PATH")
+    if database_path:
+        try:
+            database.set_path(database_path)
+        except RuntimeError as exc:
+            logger.warning(
+                "Не удалось обновить путь к базе данных на %s: %s",
+                database_path,
+                exc,
+            )
 
     if _env_flag("DISCORD_MESSAGE_CONTENT_INTENT", default=True):
         if hasattr(intents, "message_content"):
