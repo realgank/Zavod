@@ -29,6 +29,16 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    """Return True if the environment variable represents an enabled flag."""
+
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -423,6 +433,22 @@ async def _run_bot(token: str) -> None:
 def main() -> None:
     env_file = Path(__file__).resolve().parent / ".env"
     _load_env_file(env_file)
+
+    if _env_flag("DISCORD_MESSAGE_CONTENT_INTENT", default=True):
+        if hasattr(intents, "message_content"):
+            intents.message_content = True
+            bot.intents.message_content = True
+            logger.info(
+                "Включено привилегированное намерение message_content. Убедитесь, что оно также включено в настройках приложения Discord."
+            )
+        else:
+            logger.warning(
+                "Текущая версия discord.py не поддерживает намерение message_content"
+            )
+    else:
+        logger.info(
+            "Привилегированное намерение message_content отключено через переменную окружения"
+        )
 
     token = os.getenv("DISCORD_TOKEN")
     if not token:
