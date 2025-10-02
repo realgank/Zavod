@@ -130,6 +130,59 @@ else
 fi
 
 #############################
+# Installation directory and repository configuration
+#############################
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_INSTALL_DIR="$HOME/zavod-bot"
+DEFAULT_REPO_BRANCH="main"
+DEFAULT_REPO_URL=""
+declare -A EXISTING_ENV=()
+
+if [[ -d "${SCRIPT_DIR}/.git" ]]; then
+    DEFAULT_REPO_URL=$(git -C "${SCRIPT_DIR}" remote get-url origin 2>/dev/null || true)
+    DEFAULT_REPO_BRANCH=$(git -C "${SCRIPT_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+fi
+
+INSTALL_DIR=$(prompt_with_default "Введите директорию установки" "${DEFAULT_INSTALL_DIR}")
+INSTALL_DIR="${INSTALL_DIR%/}"
+
+if [[ -f "${INSTALL_DIR}/.env" ]]; then
+    while IFS='=' read -r key value; do
+        [[ -z "${key}" || "${key}" == \#* ]] && continue
+        EXISTING_ENV["${key}"]="${value}"
+    done < "${INSTALL_DIR}/.env"
+fi
+
+if [[ -n "${DEFAULT_REPO_URL}" ]]; then
+    REPO_URL=$(prompt_with_default "Введите URL GitHub репозитория" "${DEFAULT_REPO_URL}")
+else
+    REPO_URL=$(prompt_required "Введите URL GitHub репозитория")
+fi
+
+REPO_BRANCH=$(prompt_with_default "Введите ветку репозитория" "${DEFAULT_REPO_BRANCH}")
+
+DISCORD_TOKEN_DEFAULT="${EXISTING_ENV[DISCORD_TOKEN]:-}"
+GITHUB_USERNAME_DEFAULT="${EXISTING_ENV[GITHUB_USERNAME]:-}"
+GITHUB_TOKEN_DEFAULT="${EXISTING_ENV[GITHUB_TOKEN]:-}"
+
+DISCORD_TOKEN=$(prompt_secret "Введите Discord токен" "${DISCORD_TOKEN_DEFAULT}" "false")
+if [[ -z "${DISCORD_TOKEN}" ]]; then
+    error "Discord токен не может быть пустым."
+    exit 1
+fi
+
+GITHUB_USERNAME=$(prompt_with_default "GitHub имя пользователя (для приватного репозитория, можно оставить пустым)" "${GITHUB_USERNAME_DEFAULT}")
+GITHUB_TOKEN=$(prompt_secret "GitHub токен (Personal Access Token, можно оставить пустым)" "${GITHUB_TOKEN_DEFAULT}" "true")
+
+if { [[ -n "${GITHUB_USERNAME}" ]] && [[ -z "${GITHUB_TOKEN}" ]]; } || \
+   { [[ -z "${GITHUB_USERNAME}" ]] && [[ -n "${GITHUB_TOKEN}" ]]; }; then
+    info "Указаны не все данные для GitHub. Значения будут проигнорированы."
+    GITHUB_USERNAME=""
+    GITHUB_TOKEN=""
+fi
+
+#############################
 # Install base packages
 #############################
 
@@ -139,55 +192,78 @@ ${SUDO:-} apt-get update
 ${SUDO:-} apt-get install -y python3 python3-venv python3-pip git
 
 #############################
-# Installation directory setup
+# Prepare installation directory
 #############################
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_INSTALL_DIR="$HOME/zavod-bot"
-INSTALL_DIR=$(prompt_with_default "Введите директорию установки" "${DEFAULT_INSTALL_DIR}")
-INSTALL_DIR="${INSTALL_DIR%/}"
 
 if [[ -d "${INSTALL_DIR}" ]]; then
     if [[ -n "$(ls -A "${INSTALL_DIR}" 2>/dev/null)" ]]; then
         if confirm "Директория ${INSTALL_DIR} не пуста. Очистить её перед установкой?" "n"; then
             info "Очистка директории ${INSTALL_DIR}..."
             rm -rf "${INSTALL_DIR}"
-            mkdir -p "${INSTALL_DIR}"
         else
             error "Установка отменена пользователем."
             exit 1
         fi
+    else
+        rm -rf "${INSTALL_DIR}"
     fi
-else
-    info "Создание директории ${INSTALL_DIR}..."
-    mkdir -p "${INSTALL_DIR}"
+fi
+
+PARENT_DIR="$(dirname "${INSTALL_DIR}")"
+if [[ ! -d "${PARENT_DIR}" ]]; then
+    info "Создание директории ${PARENT_DIR}..."
+    mkdir -p "${PARENT_DIR}"
 fi
 
 #############################
-# Copy project files
+# Clone project repository
 #############################
 
-if [[ "${SCRIPT_DIR}" != "${INSTALL_DIR}" ]]; then
-    info "Копирование файлов проекта..."
-    shopt -s dotglob nullglob
-    for item in "${SCRIPT_DIR}"/*; do
-        name="$(basename "${item}")"
-        case "${name}" in
-            .venv|__pycache__|install.sh)
-                continue
-                ;;
-        esac
-        if [[ -d "${item}" ]]; then
-            rm -rf "${INSTALL_DIR}/${name}"
-            cp -R "${item}" "${INSTALL_DIR}/${name}"
-        else
-            cp "${item}" "${INSTALL_DIR}/${name}"
-        fi
-    done
-    shopt -u dotglob nullglob
-else
-    info "Исходная и целевая директории совпадают, копирование пропущено."
+info "Загрузка исходного кода из GitHub..."
+
+CLONE_ENV=()
+ASKPASS_PATH=""
+
+cleanup_clone_env() {
+    if [[ -n "${ASKPASS_PATH}" ]]; then
+        rm -f "${ASKPASS_PATH}" || true
+    fi
+}
+
+trap cleanup_clone_env EXIT
+
+if [[ -n "${GITHUB_USERNAME}" && -n "${GITHUB_TOKEN}" ]]; then
+    ASKPASS_PATH="$(mktemp -t git-askpass-XXXXXX)"
+    cat > "${ASKPASS_PATH}" <<EOF_ASKPASS
+#!/usr/bin/env bash
+case "\$1" in
+    *'Username'*|*'username'*)
+        printf '%s' '${GITHUB_USERNAME}'
+        ;;
+    *)
+        printf '%s' '${GITHUB_TOKEN}'
+        ;;
+esac
+EOF_ASKPASS
+    chmod 700 "${ASKPASS_PATH}"
+    CLONE_ENV+=("GIT_ASKPASS=${ASKPASS_PATH}")
+    CLONE_ENV+=("SSH_ASKPASS=${ASKPASS_PATH}")
+    CLONE_ENV+=("GIT_TERMINAL_PROMPT=0")
 fi
+
+CLONE_COMMAND=(git clone --single-branch)
+if [[ -n "${REPO_BRANCH}" ]]; then
+    CLONE_COMMAND+=("--branch" "${REPO_BRANCH}")
+fi
+CLONE_COMMAND+=("${REPO_URL}" "${INSTALL_DIR}")
+
+if ! env "${CLONE_ENV[@]}" "${CLONE_COMMAND[@]}"; then
+    error "Не удалось клонировать репозиторий."
+    exit 1
+fi
+
+cleanup_clone_env
+trap - EXIT
 
 #############################
 # Python virtual environment
@@ -211,36 +287,7 @@ deactivate
 #############################
 
 ENV_FILE="${INSTALL_DIR}/.env"
-info "Настройка переменных окружения (файл ${ENV_FILE})"
-
-declare -A EXISTING_ENV=()
-if [[ -f "${ENV_FILE}" ]]; then
-    info "Обнаружен существующий файл .env. Значения будут использованы по умолчанию."
-    while IFS='=' read -r key value; do
-        [[ -z "${key}" || "${key}" == \#* ]] && continue
-        EXISTING_ENV["${key}"]="${value}"
-    done < "${ENV_FILE}"
-fi
-
-DISCORD_TOKEN_DEFAULT="${EXISTING_ENV[DISCORD_TOKEN]:-}"
-DISCORD_TOKEN=$(prompt_secret "Введите Discord токен" "${DISCORD_TOKEN_DEFAULT}" "false")
-if [[ -z "${DISCORD_TOKEN}" ]]; then
-    error "Discord токен не может быть пустым."
-    exit 1
-fi
-
-GITHUB_USERNAME_DEFAULT="${EXISTING_ENV[GITHUB_USERNAME]:-}"
-GITHUB_USERNAME=$(prompt_with_default "GitHub имя пользователя (для приватного репозитория, можно оставить пустым)" "${GITHUB_USERNAME_DEFAULT}")
-
-GITHUB_TOKEN_DEFAULT="${EXISTING_ENV[GITHUB_TOKEN]:-}"
-GITHUB_TOKEN=$(prompt_secret "GitHub токен (Personal Access Token, можно оставить пустым)" "${GITHUB_TOKEN_DEFAULT}" "true")
-
-if { [[ -n "${GITHUB_USERNAME}" ]] && [[ -z "${GITHUB_TOKEN}" ]]; } || \
-   { [[ -z "${GITHUB_USERNAME}" ]] && [[ -n "${GITHUB_TOKEN}" ]]; }; then
-    info "Указаны не все данные для GitHub. Значения будут проигнорированы."
-    GITHUB_USERNAME=""
-    GITHUB_TOKEN=""
-fi
+info "Запись переменных окружения в ${ENV_FILE}"
 
 cat > "${ENV_FILE}" <<EOF_ENV
 DISCORD_TOKEN=${DISCORD_TOKEN}
