@@ -25,6 +25,61 @@ prompt_with_default() {
     fi
 }
 
+prompt_required() {
+    local prompt_text="$1"
+    local default_value="${2:-}"
+    local input
+
+    while true; do
+        if [[ -n "${default_value}" ]]; then
+            read -r -p "${prompt_text} [${default_value}]: " input || true
+            input=${input:-${default_value}}
+        else
+            read -r -p "${prompt_text}: " input || true
+        fi
+
+        if [[ -n "${input}" ]]; then
+            echo "${input}"
+            return 0
+        fi
+
+        echo "Значение не может быть пустым." >&2
+    done
+}
+
+prompt_secret() {
+    local prompt_text="$1"
+    local default_value="${2:-}"
+    local allow_empty="${3:-false}"
+    local input
+
+    while true; do
+        if [[ -n "${default_value}" ]]; then
+            read -r -s -p "${prompt_text} (оставьте пустым, чтобы сохранить текущее значение): " input || true
+            echo
+            if [[ -z "${input}" ]]; then
+                echo "${default_value}"
+                return 0
+            fi
+        else
+            read -r -s -p "${prompt_text}: " input || true
+            echo
+        fi
+
+        if [[ -n "${input}" ]]; then
+            echo "${input}"
+            return 0
+        fi
+
+        if [[ "${allow_empty}" == "true" ]]; then
+            echo ""
+            return 0
+        fi
+
+        echo "Значение не может быть пустым." >&2
+    done
+}
+
 confirm() {
     local prompt_text="$1"
     local default_answer="$2"
@@ -143,6 +198,10 @@ python3 -m venv "${INSTALL_DIR}/.venv"
 # shellcheck disable=SC1090
 source "${INSTALL_DIR}/.venv/bin/activate"
 python -m pip install --upgrade pip
+if [[ ! -f "${INSTALL_DIR}/requirements.txt" ]]; then
+    error "Файл requirements.txt не найден в директории установки (${INSTALL_DIR})."
+    exit 1
+fi
 python -m pip install -r "${INSTALL_DIR}/requirements.txt"
 
 deactivate
@@ -154,15 +213,27 @@ deactivate
 ENV_FILE="${INSTALL_DIR}/.env"
 info "Настройка переменных окружения (файл ${ENV_FILE})"
 
-read -r -p "Введите Discord токен: " DISCORD_TOKEN
+declare -A EXISTING_ENV=()
+if [[ -f "${ENV_FILE}" ]]; then
+    info "Обнаружен существующий файл .env. Значения будут использованы по умолчанию."
+    while IFS='=' read -r key value; do
+        [[ -z "${key}" || "${key}" == \#* ]] && continue
+        EXISTING_ENV["${key}"]="${value}"
+    done < "${ENV_FILE}"
+fi
+
+DISCORD_TOKEN_DEFAULT="${EXISTING_ENV[DISCORD_TOKEN]:-}"
+DISCORD_TOKEN=$(prompt_secret "Введите Discord токен" "${DISCORD_TOKEN_DEFAULT}" "false")
 if [[ -z "${DISCORD_TOKEN}" ]]; then
     error "Discord токен не может быть пустым."
     exit 1
 fi
 
-read -r -p "GitHub имя пользователя (для приватного репозитория, можно оставить пустым): " GITHUB_USERNAME
-read -r -s -p "GitHub токен (Personal Access Token, можно оставить пустым): " GITHUB_TOKEN
-echo
+GITHUB_USERNAME_DEFAULT="${EXISTING_ENV[GITHUB_USERNAME]:-}"
+GITHUB_USERNAME=$(prompt_with_default "GitHub имя пользователя (для приватного репозитория, можно оставить пустым)" "${GITHUB_USERNAME_DEFAULT}")
+
+GITHUB_TOKEN_DEFAULT="${EXISTING_ENV[GITHUB_TOKEN]:-}"
+GITHUB_TOKEN=$(prompt_secret "GitHub токен (Personal Access Token, можно оставить пустым)" "${GITHUB_TOKEN_DEFAULT}" "true")
 
 if { [[ -n "${GITHUB_USERNAME}" ]] && [[ -z "${GITHUB_TOKEN}" ]]; } || \
    { [[ -z "${GITHUB_USERNAME}" ]] && [[ -n "${GITHUB_TOKEN}" ]]; }; then
