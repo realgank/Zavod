@@ -47,6 +47,7 @@ database = Database()
 
 
 STATUS_CHANNEL_ENV = "BOT_STATUS_CHANNEL_ID"
+LAST_COMMAND_CHANNEL_CONFIG_KEY = "last_command_channel_id"
 
 
 def _load_env_file(env_path: Path) -> None:
@@ -291,13 +292,21 @@ async def on_ready() -> None:
     else:
         logger.info("Событие on_ready получено, но бот ещё не авторизован")
 
+    channel_id_source = "environment"
     channel_id_raw = os.getenv(STATUS_CHANNEL_ENV)
+    fallback_channel_id_raw: Optional[str] = None
     if not channel_id_raw:
-        logger.info(
-            "Переменная окружения %s не задана, уведомление о запуске пропущено",
-            STATUS_CHANNEL_ENV,
+        fallback_channel_id_raw = await database.pop_config_value(
+            LAST_COMMAND_CHANNEL_CONFIG_KEY
         )
-        return
+        if fallback_channel_id_raw is None:
+            logger.info(
+                "Переменная окружения %s не задана, сохранённых каналов тоже нет, уведомление о запуске пропущено",
+                STATUS_CHANNEL_ENV,
+            )
+            return
+        channel_id_raw = fallback_channel_id_raw
+        channel_id_source = "fallback"
 
     try:
         channel_id = int(channel_id_raw)
@@ -307,7 +316,27 @@ async def on_ready() -> None:
             STATUS_CHANNEL_ENV,
             channel_id_raw,
         )
-        return
+        if channel_id_source == "environment":
+            fallback_channel_id_raw = await database.pop_config_value(
+                LAST_COMMAND_CHANNEL_CONFIG_KEY
+            )
+            if fallback_channel_id_raw is None:
+                return
+            logger.info(
+                "Использую сохранённый канал для уведомления о запуске: %s",
+                fallback_channel_id_raw,
+            )
+            channel_id_source = "fallback"
+            try:
+                channel_id = int(fallback_channel_id_raw)
+            except ValueError:
+                logger.warning(
+                    "Сохранённый идентификатор канала некорректен: %s",
+                    fallback_channel_id_raw,
+                )
+                return
+        else:
+            return
 
     channel = bot.get_channel(channel_id)
     if channel is None:
@@ -598,6 +627,20 @@ async def update_bot_command(interaction: discord.Interaction) -> None:
     except RuntimeError as exc:
         logger.warning("Перезапуск после обновления завершился с ошибкой: %s", exc)
         restart_message = f"Обновление выполнено, но перезапуск не удался: {exc}"
+    else:
+        if (
+            restart_message
+            and not os.getenv(STATUS_CHANNEL_ENV)
+            and interaction.channel_id is not None
+        ):
+            await database.set_config_value(
+                LAST_COMMAND_CHANNEL_CONFIG_KEY,
+                str(interaction.channel_id),
+            )
+            logger.info(
+                "Сохранил канал %s для уведомления после перезапуска",
+                interaction.channel_id,
+            )
 
     logger.info("Команда update_bot завершилась успешно")
     response_lines = ["Успешно обновлено из GitHub. Итог:", result]
