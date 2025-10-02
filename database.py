@@ -351,6 +351,52 @@ class Database:
         logger.info("Получена цена ресурса '%s': %s", name, unit_price)
         return unit_price
 
+    async def search_resource_names(
+        self, query: str = "", *, limit: int = 25
+    ) -> list[str]:
+        """Возвращает список ресурсов, совпадающих с запросом."""
+
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        if limit <= 0:
+            return []
+
+        def _escape_like(text: str) -> str:
+            return (
+                text.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+
+        normalised_query = query.strip()
+        pattern = f"%{_escape_like(normalised_query)}%"
+
+        logger.debug(
+            "Ищу ресурсы по запросу '%s' (ограничение %s)",
+            normalised_query,
+            limit,
+        )
+
+        cursor = await self._conn.execute(
+            """
+            SELECT name
+            FROM resources
+            WHERE name LIKE ? ESCAPE '\\'
+            ORDER BY name COLLATE NOCASE
+            LIMIT ?
+            """,
+            (pattern, limit),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+        names = [row["name"] for row in rows]
+        logger.debug(
+            "Найдено %s ресурсов по запросу '%s'", len(names), normalised_query
+        )
+        return names
+
     async def set_config_value(self, key: str, value: str) -> None:
         if self._conn is None:
             raise RuntimeError("Database connection is not initialised")

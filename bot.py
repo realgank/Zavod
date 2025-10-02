@@ -687,6 +687,19 @@ async def resource_price_command(
     )
 
 
+@resource_price_command.autocomplete("resource_name")
+async def resource_price_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    """Автодополнение названий ресурсов из базы данных."""
+
+    del interaction  # параметр требуется интерфейсом автодополнения
+    resource_names = await database.search_resource_names(current)
+    return [
+        app_commands.Choice(name=name, value=name) for name in resource_names
+    ]
+
+
 @bot.tree.command(name="set_efficiency", description="Установить глобальную эффективность")
 @app_commands.checks.has_permissions(administrator=True)
 @app_commands.describe(value="Новое значение эффективности в процентах")
