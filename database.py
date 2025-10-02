@@ -263,44 +263,73 @@ class Database:
         logger.info("Получена цена ресурса '%s': %s", name, unit_price)
         return unit_price
 
-    async def set_global_efficiency(self, efficiency: Decimal) -> None:
+    async def set_config_value(self, key: str, value: str) -> None:
         if self._conn is None:
             raise RuntimeError("Database connection is not initialised")
-        logger.info("Устанавливаю глобальную эффективность %s", efficiency)
         async with self._lock:
             await self._conn.execute(
                 """
                 INSERT INTO config(key, value) VALUES(?, ?)
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """,
-                ("global_efficiency", str(efficiency)),
+                (key, value),
             )
             await self._conn.commit()
-            logger.debug("Глобальная эффективность обновлена в базе данных")
+
+    async def get_config_value(self, key: str) -> Optional[str]:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+        cursor = await self._conn.execute(
+            "SELECT value FROM config WHERE key = ?",
+            (key,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return str(row["value"])
+
+    async def pop_config_value(self, key: str) -> Optional[str]:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT value FROM config WHERE key = ?",
+                (key,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                return None
+            await self._conn.execute("DELETE FROM config WHERE key = ?", (key,))
+            await self._conn.commit()
+            return str(row["value"])
+
+    async def set_global_efficiency(self, efficiency: Decimal) -> None:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+        logger.info("Устанавливаю глобальную эффективность %s", efficiency)
+        await self.set_config_value("global_efficiency", str(efficiency))
+        logger.debug("Глобальная эффективность обновлена в базе данных")
 
     async def get_global_efficiency(self) -> Decimal:
         if self._conn is None:
             raise RuntimeError("Database connection is not initialised")
         logger.debug("Получаю значение глобальной эффективности")
-        cursor = await self._conn.execute(
-            "SELECT value FROM config WHERE key = ?",
-            ("global_efficiency",),
-        )
-        row = await cursor.fetchone()
-        await cursor.close()
-        if row is None:
+        value_raw = await self.get_config_value("global_efficiency")
+        if value_raw is None:
             logger.warning(
                 "Значение глобальной эффективности отсутствует в таблице config, используется значение по умолчанию"
             )
             return Decimal("100")
         try:
-            value = Decimal(row["value"])
+            value = Decimal(value_raw)
             logger.debug("Получено значение глобальной эффективности %s", value)
             return value
         except (InvalidOperation, TypeError):
             logger.error(
                 "Не удалось преобразовать значение глобальной эффективности '%s', используется значение по умолчанию",
-                row["value"],
+                value_raw,
             )
             return Decimal("100")
 
