@@ -46,6 +46,9 @@ bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
 database = Database()
 
 
+STATUS_CHANNEL_ENV = "BOT_STATUS_CHANNEL_ID"
+
+
 def _load_env_file(env_path: Path) -> None:
     """Load environment variables from a .env file if it exists."""
 
@@ -278,6 +281,79 @@ async def setup_hook() -> None:
     await database.connect()
     logger.info("Подключение к базе данных завершено")
     await bot.tree.sync()
+
+
+@bot.event
+async def on_ready() -> None:
+    user = bot.user
+    if user is not None:
+        logger.info("Бот авторизован как %s (%s)", user, user.id)
+    else:
+        logger.info("Событие on_ready получено, но бот ещё не авторизован")
+
+    channel_id_raw = os.getenv(STATUS_CHANNEL_ENV)
+    if not channel_id_raw:
+        logger.info(
+            "Переменная окружения %s не задана, уведомление о запуске пропущено",
+            STATUS_CHANNEL_ENV,
+        )
+        return
+
+    try:
+        channel_id = int(channel_id_raw)
+    except ValueError:
+        logger.warning(
+            "Значение переменной %s должно быть целым числом, получено: %s",
+            STATUS_CHANNEL_ENV,
+            channel_id_raw,
+        )
+        return
+
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Не удалось получить канал %s для уведомления о запуске: %s",
+                channel_id,
+                exc,
+            )
+            return
+
+    if channel is None:
+        logger.warning("Канал с ID %s не найден", channel_id)
+        return
+
+    try:
+        stats = await database.get_statistics()
+    except Exception as exc:  # pragma: no cover - логирование при ошибке
+        logger.exception("Не удалось получить статистику базы данных: %s", exc)
+        stats = None
+
+    message_lines = ["Бот успешно запущен и готов к работе."]
+    if stats is not None:
+        message_lines.extend(
+            [
+                "Статистика базы данных:",
+                f"• Рецептов: {stats['recipes']}",
+                f"• Ресурсов: {stats['resources']}",
+                f"• Компонентов рецептов: {stats['recipe_components']}",
+            ]
+        )
+    else:
+        message_lines.append(
+            "Не удалось получить статистику базы данных, подробности в журналах."
+        )
+
+    try:
+        await channel.send("\n".join(message_lines))
+    except discord.HTTPException as exc:
+        logger.warning(
+            "Не удалось отправить сообщение о запуске в канал %s: %s",
+            channel_id,
+            exc,
+        )
 
 
 @bot.tree.command(name="add_recipe", description="Добавить или обновить рецепт")

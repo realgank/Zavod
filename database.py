@@ -61,6 +61,43 @@ class Database:
             await self._conn.close()
             self._conn = None
 
+    async def get_statistics(self) -> dict[str, int]:
+        """Возвращает агрегированную статистику по базе данных."""
+
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        async with self._lock:
+            logger.debug("Собираю статистику по базе данных")
+            cursor = await self._conn.execute("SELECT COUNT(*) AS count FROM recipes")
+            recipe_row = await cursor.fetchone()
+            await cursor.close()
+
+            cursor = await self._conn.execute("SELECT COUNT(*) AS count FROM resources")
+            resource_row = await cursor.fetchone()
+            await cursor.close()
+
+            cursor = await self._conn.execute(
+                "SELECT COUNT(*) AS count FROM recipe_components"
+            )
+            components_row = await cursor.fetchone()
+            await cursor.close()
+
+            stats = {
+                "recipes": int(recipe_row["count"] if recipe_row else 0),
+                "resources": int(resource_row["count"] if resource_row else 0),
+                "recipe_components": int(
+                    components_row["count"] if components_row else 0
+                ),
+            }
+            logger.info(
+                "Статистика базы данных: рецептов=%s, ресурсов=%s, компонентов=%s",
+                stats["recipes"],
+                stats["resources"],
+                stats["recipe_components"],
+            )
+            return stats
+
     async def _initialise_schema(self, conn: aiosqlite.Connection) -> None:
         logger.debug("Проверяю схему базы данных")
         await conn.executescript(
