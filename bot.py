@@ -11,6 +11,7 @@ from typing import Optional
 
 import discord
 from discord import app_commands
+from discord.abc import Messageable
 from discord.ext import commands
 
 from database import (
@@ -49,6 +50,7 @@ database = Database()
 STATUS_CHANNEL_ENV = "BOT_STATUS_CHANNEL_ID"
 LAST_COMMAND_CHANNEL_CONFIG_KEY = "last_command_channel_id"
 RECIPE_FEED_CHANNEL_ID = 1423404992273977364
+RESTART_LOG_CHANNEL_ID = 1423405721998987306
 
 
 def _load_env_file(env_path: Path) -> None:
@@ -127,6 +129,49 @@ def _parse_recipe_table(raw_table: str) -> list[RecipeComponent]:
         raise ValueError("Не удалось найти ни одной строки с компонентами рецепта")
     logger.info("Разобрано %s компонентов рецепта", len(components))
     return components
+
+
+def _split_message(content: str, *, limit: int = 2000) -> list[str]:
+    """Split *content* into chunks that fit within Discord's message limit."""
+
+    if not content:
+        return [""]
+    return [content[i : i + limit] for i in range(0, len(content), limit)]
+
+
+async def _send_restart_log(message: str) -> None:
+    """Отправить сообщение с логами перезапуска в выделенный канал."""
+
+    channel_id = RESTART_LOG_CHANNEL_ID
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Не удалось получить канал %s для логов перезапуска: %s",
+                channel_id,
+                exc,
+            )
+            return
+
+    if channel is None or not isinstance(channel, Messageable):
+        logger.warning(
+            "Канал %s недоступен или не поддерживает отправку сообщений для логов перезапуска",
+            channel_id,
+        )
+        return
+
+    for chunk in _split_message(message):
+        try:
+            await channel.send(chunk)
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Не удалось отправить лог перезапуска в канал %s: %s",
+                channel_id,
+                exc,
+            )
+            break
 
 
 async def _read_attachment_content(attachment: Optional[discord.Attachment]) -> Optional[str]:
@@ -670,11 +715,13 @@ async def update_bot_command(interaction: discord.Interaction) -> None:
     if len(result) > 1900:
         result = result[:1900] + "…"
     restart_message: Optional[str]
+    restart_log_message: Optional[str] = None
     try:
         restart_message = await _restart_service_if_configured()
     except RuntimeError as exc:
         logger.warning("Перезапуск после обновления завершился с ошибкой: %s", exc)
         restart_message = f"Обновление выполнено, но перезапуск не удался: {exc}"
+        restart_log_message = restart_message
     else:
         if (
             restart_message
@@ -689,6 +736,20 @@ async def update_bot_command(interaction: discord.Interaction) -> None:
                 "Сохранил канал %s для уведомления после перезапуска",
                 interaction.channel_id,
             )
+        if restart_message:
+            restart_log_message = restart_message
+
+    if restart_log_message:
+        restart_log_lines = [
+            "Перезапуск после команды /update_bot.",
+            f"Пользователь: {interaction.user} (ID: {interaction.user.id})",
+        ]
+        if interaction.guild_id is not None:
+            restart_log_lines.append(f"Сервер: {interaction.guild_id}")
+        if interaction.channel_id is not None:
+            restart_log_lines.append(f"Канал команды: {interaction.channel_id}")
+        restart_log_lines.extend(["", restart_log_message])
+        await _send_restart_log("\n".join(restart_log_lines))
 
     logger.info("Команда update_bot завершилась успешно")
     response_lines = ["Успешно обновлено из GitHub. Итог:", result]
