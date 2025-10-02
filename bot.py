@@ -48,6 +48,7 @@ database = Database()
 
 STATUS_CHANNEL_ENV = "BOT_STATUS_CHANNEL_ID"
 LAST_COMMAND_CHANNEL_CONFIG_KEY = "last_command_channel_id"
+RECIPE_FEED_CHANNEL_ID = 1423404992273977364
 
 
 def _load_env_file(env_path: Path) -> None:
@@ -276,6 +277,47 @@ async def _restart_service_if_configured() -> Optional[str]:
     return None
 
 
+async def _notify_recipe_added(
+    recipe_name: str, *, output_quantity: Decimal, component_count: int
+) -> None:
+    """Send a notification to the recipe feed channel about a new or updated recipe."""
+
+    channel_id = RECIPE_FEED_CHANNEL_ID
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Не удалось получить канал %s для уведомления о рецепте: %s",
+                channel_id,
+                exc,
+            )
+            return
+
+    if channel is None:
+        logger.warning("Канал с ID %s для уведомлений о рецептах не найден", channel_id)
+        return
+
+    message = "\n".join(
+        [
+            f"Рецепт '{recipe_name}' был добавлен или обновлён.",
+            f"Выход за цикл: {output_quantity}",
+            f"Количество компонентов: {component_count}",
+        ]
+    )
+
+    try:
+        await channel.send(message)
+    except discord.HTTPException as exc:
+        logger.warning(
+            "Не удалось отправить уведомление о рецепте '%s' в канал %s: %s",
+            recipe_name,
+            channel_id,
+            exc,
+        )
+
+
 @bot.event
 async def setup_hook() -> None:
     logger.info("Запуск setup_hook: подключаюсь к базе данных")
@@ -454,6 +496,12 @@ async def add_recipe_command(
     await interaction.followup.send(
         f"Рецепт '{recipe_name}' успешно сохранён. Обновлены цены {len(components)} ресурсов.",
         ephemeral=False,
+    )
+
+    await _notify_recipe_added(
+        recipe_name,
+        output_quantity=Decimal(output_quantity),
+        component_count=len(components),
     )
 
 
