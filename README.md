@@ -40,6 +40,8 @@ export DISCORD_TOKEN=ВАШ_ТОКЕН
 # Для приватного репозитория GitHub (опционально):
 export GITHUB_USERNAME=ВАШ_ЛОГИН
 export GITHUB_TOKEN=ВАШ_PERSONAL_ACCESS_TOKEN
+# Путь к базе данных (опционально, позволяет использовать общую базу для нескольких серверов)
+export DATABASE_PATH=/srv/zavod/zavod.db
 ```
 
 ## Запуск
