@@ -2,6 +2,8 @@ import asyncio
 import logging
 import os
 import re
+import shlex
+import tempfile
 from asyncio import subprocess
 from decimal import Decimal
 from typing import Optional
@@ -70,13 +72,48 @@ async def _read_attachment_content(message: discord.Message) -> Optional[str]:
 
 
 async def _pull_latest_code() -> str:
-    process = await asyncio.create_subprocess_exec(
-        "git",
-        "pull",
-        "--ff-only",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    env = os.environ.copy()
+    github_username = env.get("GITHUB_USERNAME")
+    github_token = env.get("GITHUB_TOKEN")
+    askpass_path: Optional[str] = None
+    process: Optional[asyncio.subprocess.Process] = None
+
+    try:
+        if github_token and github_username:
+            fd, askpass_path = tempfile.mkstemp(prefix="git-askpass-", text=True)
+            with os.fdopen(fd, "w", encoding="utf-8") as askpass_file:
+                askpass_file.write("#!/usr/bin/env bash\n")
+                askpass_file.write("case \"$1\" in\n")
+                askpass_file.write("    *'Username'*|*'username'*)\n")
+                askpass_file.write(f"        echo {shlex.quote(github_username)}\n")
+                askpass_file.write("        ;;\n")
+                askpass_file.write("    *)\n")
+                askpass_file.write(f"        echo {shlex.quote(github_token)}\n")
+                askpass_file.write("        ;;\n")
+                askpass_file.write("esac\n")
+            os.chmod(askpass_path, 0o700)
+            env["GIT_ASKPASS"] = askpass_path
+            env["SSH_ASKPASS"] = askpass_path
+            env["GIT_TERMINAL_PROMPT"] = "0"
+
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            "pull",
+            "--ff-only",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+    finally:
+        if askpass_path:
+            try:
+                os.remove(askpass_path)
+            except FileNotFoundError:
+                pass
+
+    if process is None:
+        raise RuntimeError("Не удалось запустить git pull")
+
     stdout, stderr = await process.communicate()
     if process.returncode != 0:
         error_output = stderr.decode().strip() or stdout.decode().strip()
