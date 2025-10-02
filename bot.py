@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from database import (
@@ -40,7 +41,7 @@ def _env_flag(name: str, *, default: bool = False) -> bool:
 
 
 intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
 
 database = Database()
 
@@ -123,12 +124,11 @@ def _parse_recipe_table(raw_table: str) -> list[RecipeComponent]:
     return components
 
 
-async def _read_attachment_content(message: discord.Message) -> Optional[str]:
-    logger.debug("Проверяю наличие вложений в сообщении %s", message.id)
-    if not message.attachments:
-        logger.debug("В сообщении %s вложений не найдено", message.id)
+async def _read_attachment_content(attachment: Optional[discord.Attachment]) -> Optional[str]:
+    logger.debug("Проверяю наличие вложения для обработки рецепта")
+    if attachment is None:
+        logger.debug("Вложение не предоставлено")
         return None
-    attachment = message.attachments[0]
     logger.info(
         "Найдено вложение '%s' размером %s байт", attachment.filename, attachment.size
     )
@@ -220,38 +220,50 @@ async def setup_hook() -> None:
     logger.info("Запуск setup_hook: подключаюсь к базе данных")
     await database.connect()
     logger.info("Подключение к базе данных завершено")
+    await bot.tree.sync()
 
 
-@bot.command(name="add_recipe")
-@commands.has_permissions(manage_guild=True)
+@bot.tree.command(name="add_recipe", description="Добавить или обновить рецепт")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    recipe_name="Название рецепта",
+    output_quantity="Количество результата на цикл",
+    table="Текстовая таблица с компонентами",
+    file="Текстовый файл с таблицей рецепта",
+)
 async def add_recipe_command(
-    ctx: commands.Context,
+    interaction: discord.Interaction,
     recipe_name: str,
     output_quantity: Optional[int] = 1,
-    *,
-    raw_table: Optional[str] = None,
+    table: Optional[str] = None,
+    file: Optional[discord.Attachment] = None,
 ) -> None:
     """Добавляет или обновляет рецепт."""
 
     logger.info(
         "Получена команда add_recipe: пользователь=%s, рецепт=%s, количество=%s",
-        ctx.author,
+        interaction.user,
         recipe_name,
         output_quantity,
     )
     if output_quantity is None:
         output_quantity = 1
     if output_quantity <= 0:
-        await ctx.send("Количество результата должно быть положительным")
+        await interaction.response.send_message(
+            "Количество результата должно быть положительным", ephemeral=False
+        )
         return
 
-    table_text = raw_table
+    await interaction.response.defer(thinking=True)
+
+    table_text = table
     if table_text is None:
-        attachment_text = await _read_attachment_content(ctx.message)
+        attachment_text = await _read_attachment_content(file)
         table_text = attachment_text
     if table_text is None:
-        await ctx.send(
-            "Не найден текст рецепта. Отправьте таблицу в сообщении или приложите текстовый файл."
+        await interaction.followup.send(
+            "Не найден текст рецепта. Отправьте таблицу в поле команды или приложите файл.",
+            ephemeral=False,
         )
         return
 
@@ -263,22 +275,33 @@ async def add_recipe_command(
             components=components,
         )
     except ValueError as exc:
-        await ctx.send(f"Ошибка разбора рецепта: {exc}")
+        await interaction.followup.send(
+            f"Ошибка разбора рецепта: {exc}", ephemeral=False
+        )
         return
     except Exception as exc:  # pragma: no cover - safety net for discord command context
         logging.exception("Unexpected error while adding recipe")
-        await ctx.send(f"Произошла непредвиденная ошибка: {exc}")
+        await interaction.followup.send(
+            f"Произошла непредвиденная ошибка: {exc}", ephemeral=False
+        )
         return
 
     logger.info(
         "Рецепт '%s' успешно сохранён, обновлено %s ресурсов", recipe_name, len(components)
     )
-    await ctx.send(f"Рецепт '{recipe_name}' успешно сохранён. Обновлены цены {len(components)} ресурсов.")
+    await interaction.followup.send(
+        f"Рецепт '{recipe_name}' успешно сохранён. Обновлены цены {len(components)} ресурсов.",
+        ephemeral=False,
+    )
 
 
-@bot.command(name="price")
+@bot.tree.command(name="price", description="Рассчитать стоимость рецепта")
+@app_commands.describe(
+    recipe_name="Название рецепта",
+    efficiency="Эффективность производства в процентах",
+)
 async def recipe_price_command(
-    ctx: commands.Context,
+    interaction: discord.Interaction,
     recipe_name: str,
     efficiency: Optional[float] = None,
 ) -> None:
@@ -287,7 +310,7 @@ async def recipe_price_command(
     efficiency_decimal: Optional[Decimal]
     logger.info(
         "Получена команда price: пользователь=%s, рецепт=%s, эффективность=%s",
-        ctx.author,
+        interaction.user,
         recipe_name,
         efficiency,
     )
@@ -297,22 +320,26 @@ async def recipe_price_command(
         try:
             efficiency_decimal = parse_decimal(str(efficiency))
         except ValueError:
-            await ctx.send("Эффективность должна быть числом")
+            await interaction.response.send_message(
+                "Эффективность должна быть числом", ephemeral=False
+            )
             return
 
     try:
         result = await database.calculate_recipe_cost(recipe_name, efficiency_decimal)
     except RecipeNotFoundError:
-        await ctx.send(f"Рецепт '{recipe_name}' не найден")
+        await interaction.response.send_message(
+            f"Рецепт '{recipe_name}' не найден", ephemeral=False
+        )
         return
     except ResourcePriceNotFoundError as exc:
-        await ctx.send(str(exc))
+        await interaction.response.send_message(str(exc), ephemeral=False)
         return
     except CircularRecipeReferenceError as exc:
-        await ctx.send(str(exc))
+        await interaction.response.send_message(str(exc), ephemeral=False)
         return
     except ValueError as exc:
-        await ctx.send(str(exc))
+        await interaction.response.send_message(str(exc), ephemeral=False)
         return
 
     effective_efficiency = result["efficiency"]
@@ -326,7 +353,7 @@ async def recipe_price_command(
         effective_efficiency,
         run_cost,
     )
-    await ctx.send(
+    await interaction.response.send_message(
         "\n".join(
             [
                 f"Расчёт для '{recipe_name}'",
@@ -339,84 +366,103 @@ async def recipe_price_command(
     )
 
 
-@bot.command(name="resource_price")
-async def resource_price_command(ctx: commands.Context, *, resource_name: str) -> None:
+@bot.tree.command(name="resource_price", description="Показать цену ресурса")
+@app_commands.describe(resource_name="Название ресурса")
+async def resource_price_command(
+    interaction: discord.Interaction, *, resource_name: str
+) -> None:
     """Показывает последнюю сохранённую цену ресурса."""
 
     logger.info(
         "Получена команда resource_price: пользователь=%s, ресурс=%s",
-        ctx.author,
+        interaction.user,
         resource_name,
     )
     price = await database.get_resource_unit_price(resource_name)
     if price is None:
-        await ctx.send(f"Цена для ресурса '{resource_name}' не найдена")
+        await interaction.response.send_message(
+            f"Цена для ресурса '{resource_name}' не найдена", ephemeral=False
+        )
         return
     logger.info("Цена для ресурса '%s' составила %s", resource_name, price)
-    await ctx.send(f"Текущая цена '{resource_name}': {price:,.2f}")
+    await interaction.response.send_message(
+        f"Текущая цена '{resource_name}': {price:,.2f}", ephemeral=False
+    )
 
 
-@bot.command(name="set_efficiency")
-@commands.has_permissions(administrator=True)
-async def set_efficiency_command(ctx: commands.Context, value: float) -> None:
+@bot.tree.command(name="set_efficiency", description="Установить глобальную эффективность")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(value="Новое значение эффективности в процентах")
+async def set_efficiency_command(interaction: discord.Interaction, value: float) -> None:
     """Устанавливает глобальную эффективность по умолчанию."""
 
     logger.info(
         "Получена команда set_efficiency: пользователь=%s, значение=%s",
-        ctx.author,
+        interaction.user,
         value,
     )
     try:
         efficiency = parse_decimal(str(value))
     except ValueError:
-        await ctx.send("Эффективность должна быть числом")
+        await interaction.response.send_message(
+            "Эффективность должна быть числом", ephemeral=False
+        )
         return
     if efficiency <= 0:
-        await ctx.send("Эффективность должна быть положительной")
+        await interaction.response.send_message(
+            "Эффективность должна быть положительной", ephemeral=False
+        )
         return
 
     await database.set_global_efficiency(efficiency)
     logger.info("Установлена глобальная эффективность: %s", efficiency)
-    await ctx.send(f"Глобальная эффективность установлена на {efficiency}%")
+    await interaction.response.send_message(
+        f"Глобальная эффективность установлена на {efficiency}%", ephemeral=False
+    )
 
 
-@bot.command(name="global_efficiency")
-async def global_efficiency_command(ctx: commands.Context) -> None:
+@bot.tree.command(name="global_efficiency", description="Показать глобальную эффективность")
+async def global_efficiency_command(interaction: discord.Interaction) -> None:
     """Показывает текущую глобальную эффективность."""
 
     logger.info(
-        "Получена команда global_efficiency: пользователь=%s", ctx.author
+        "Получена команда global_efficiency: пользователь=%s", interaction.user
     )
     value = await database.get_global_efficiency()
     logger.info("Текущая глобальная эффективность: %s", value)
-    await ctx.send(f"Текущая глобальная эффективность: {value}%")
+    await interaction.response.send_message(
+        f"Текущая глобальная эффективность: {value}%", ephemeral=False
+    )
 
 
-@bot.command(name="update_bot")
-@commands.has_permissions(administrator=True)
-async def update_bot_command(ctx: commands.Context) -> None:
+@bot.tree.command(name="update_bot", description="Обновить код бота из GitHub")
+@app_commands.checks.has_permissions(administrator=True)
+async def update_bot_command(interaction: discord.Interaction) -> None:
     """Обновляет код бота из GitHub репозитория."""
 
-    logger.info("Получена команда update_bot от пользователя %s", ctx.author)
-    status_message = await ctx.send("Запускаю обновление из GitHub...")
+    logger.info("Получена команда update_bot от пользователя %s", interaction.user)
+    await interaction.response.defer(thinking=True)
     try:
         result = await _pull_latest_code()
     except FileNotFoundError:
-        await status_message.edit(content="Git не установлен на сервере")
+        await interaction.followup.send(
+            "Git не установлен на сервере", ephemeral=False
+        )
         return
     except RuntimeError as exc:
         message = f"Не удалось обновить бота: {exc}"
         if len(message) > 1900:
             message = message[:1900] + "…"
         logger.warning("Обновление кода завершилось с ошибкой: %s", exc)
-        await status_message.edit(content=message)
+        await interaction.followup.send(message, ephemeral=False)
         return
 
     if len(result) > 1900:
         result = result[:1900] + "…"
     logger.info("Команда update_bot завершилась успешно")
-    await status_message.edit(
-        content="Успешно обновлено из GitHub. Итог:\n" + result
+    await interaction.followup.send(
+        "Успешно обновлено из GitHub. Итог:\n" + result,
+        ephemeral=False,
     )
 
 
