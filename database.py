@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -6,6 +7,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import aiosqlite
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -41,20 +44,25 @@ class Database:
 
     async def connect(self) -> None:
         if self._conn is not None:
+            logger.debug("Подключение к базе данных уже установлено")
             return
+        logger.info("Открываю подключение к базе данных по пути %s", self._path)
         conn = await aiosqlite.connect(self._path)
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA foreign_keys = ON;")
         await self._initialise_schema(conn)
         await conn.commit()
         self._conn = conn
+        logger.info("Подключение к базе данных установлено")
 
     async def close(self) -> None:
         if self._conn is not None:
+            logger.info("Закрываю подключение к базе данных")
             await self._conn.close()
             self._conn = None
 
     async def _initialise_schema(self, conn: aiosqlite.Connection) -> None:
+        logger.debug("Проверяю схему базы данных")
         await conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS resources (
@@ -88,6 +96,7 @@ class Database:
             "INSERT INTO config(key, value) VALUES(?, ?) ON CONFLICT(key) DO NOTHING",
             ("global_efficiency", "100"),
         )
+        logger.debug("Проверка схемы завершена")
 
     async def add_recipe(
         self,
@@ -99,6 +108,7 @@ class Database:
             raise RuntimeError("Database connection is not initialised")
 
         async with self._lock:
+            logger.info("Сохраняю рецепт '%s'", name)
             cursor = await self._conn.execute(
                 "SELECT id FROM recipes WHERE name = ?",
                 (name,),
@@ -125,6 +135,13 @@ class Database:
                 )
 
             for component in components:
+                logger.debug(
+                    "Добавляю компонент рецепта: рецепт=%s ресурс=%s количество=%s цена=%s",
+                    name,
+                    component.resource_name,
+                    component.quantity,
+                    component.unit_price,
+                )
                 await self._conn.execute(
                     """
                     INSERT INTO recipe_components(recipe_id, resource_name, quantity)
@@ -144,10 +161,12 @@ class Database:
                 )
 
             await self._conn.commit()
+            logger.info("Рецепт '%s' сохранён", name)
 
     async def get_recipe(self, name: str) -> Optional[dict[str, Any]]:
         if self._conn is None:
             raise RuntimeError("Database connection is not initialised")
+        logger.debug("Получаю рецепт '%s'", name)
 
         cursor = await self._conn.execute(
             "SELECT id, name, output_quantity FROM recipes WHERE name = ?",
@@ -157,6 +176,7 @@ class Database:
         await cursor.close()
 
         if row is None:
+            logger.debug("Рецепт '%s' не найден", name)
             return None
 
         cursor = await self._conn.execute(
@@ -180,6 +200,7 @@ class Database:
     async def get_resource_unit_price(self, name: str) -> Optional[float]:
         if self._conn is None:
             raise RuntimeError("Database connection is not initialised")
+        logger.debug("Запрашиваю цену ресурса '%s'", name)
 
         cursor = await self._conn.execute(
             "SELECT unit_price FROM resources WHERE name = ?",
@@ -194,6 +215,7 @@ class Database:
     async def set_global_efficiency(self, efficiency: Decimal) -> None:
         if self._conn is None:
             raise RuntimeError("Database connection is not initialised")
+        logger.info("Устанавливаю глобальную эффективность %s", efficiency)
         async with self._lock:
             await self._conn.execute(
                 """
@@ -207,6 +229,7 @@ class Database:
     async def get_global_efficiency(self) -> Decimal:
         if self._conn is None:
             raise RuntimeError("Database connection is not initialised")
+        logger.debug("Получаю значение глобальной эффективности")
         cursor = await self._conn.execute(
             "SELECT value FROM config WHERE key = ?",
             ("global_efficiency",),
@@ -238,6 +261,9 @@ class Database:
             raise ValueError("Efficiency must be greater than 0")
 
         multiplier = Decimal("100") / efficiency
+        logger.info(
+            "Рассчитываю стоимость рецепта '%s' с эффективностью %s", recipe_name, efficiency
+        )
 
         async def resource_cost(resource_name: str, visiting: set[str]) -> Decimal:
             if resource_name in visiting:
@@ -269,11 +295,21 @@ class Database:
                 component_quantity = Decimal(str(component["quantity"])) * multiplier
                 component_cost = await resource_cost(component["resource_name"], visiting)
                 total += component_quantity * component_cost
+                logger.debug(
+                    "Компонент '%s': количество=%s, цена=%s, промежуточная сумма=%s",
+                    component["resource_name"],
+                    component_quantity,
+                    component_cost,
+                    total,
+                )
             return total
 
         total_run_cost = await recipe_cost(base_recipe, {recipe_name})
         output_quantity = Decimal(str(base_recipe["output_quantity"]))
         unit_cost = total_run_cost / output_quantity
+        logger.info(
+            "Стоимость рецепта '%s': цикл=%s, единица=%s", recipe_name, total_run_cost, unit_cost
+        )
         return {
             "efficiency": efficiency,
             "run_cost": total_run_cost,
@@ -298,13 +334,16 @@ async def initialise_database(path: str = "zavod.db") -> None:
 
     path_obj = Path(path)
     if path_obj.parent and not path_obj.parent.exists():
+        logger.info("Создаю директорию для базы данных: %s", path_obj.parent)
         path_obj.parent.mkdir(parents=True, exist_ok=True)
 
     db = Database(str(path_obj))
     try:
+        logger.info("Инициализирую базу данных по пути %s", path_obj)
         await db.connect()
     finally:
         await db.close()
+        logger.info("Инициализация базы данных завершена")
 
 
 if __name__ == "__main__":
