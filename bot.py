@@ -104,17 +104,23 @@ async def _pull_latest_code() -> str:
             stderr=subprocess.PIPE,
             env=env,
         )
-    finally:
+    except Exception:
         if askpass_path:
             try:
                 os.remove(askpass_path)
             except FileNotFoundError:
                 pass
+        raise
 
     if process is None:
         raise RuntimeError("Не удалось запустить git pull")
 
     stdout, stderr = await process.communicate()
+    if askpass_path:
+        try:
+            os.remove(askpass_path)
+        except FileNotFoundError:
+            pass
     if process.returncode != 0:
         error_output = stderr.decode().strip() or stdout.decode().strip()
         raise RuntimeError(error_output or "Не удалось выполнить git pull")
