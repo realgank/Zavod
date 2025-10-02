@@ -53,8 +53,26 @@ async def _migration_1_initialise_schema_version(conn: aiosqlite.Connection) -> 
     # schema version entry in the config table.
 
 
+async def _migration_2_add_recipe_status(conn: aiosqlite.Connection) -> None:
+    """Add the ``is_temporary`` flag to recipes."""
+
+    logger.info(
+        "Выполняю миграцию схемы #2: добавление признака временного рецепта"
+    )
+    cursor = await conn.execute("PRAGMA table_info(recipes)")
+    columns = [row["name"] for row in await cursor.fetchall()]
+    await cursor.close()
+    if "is_temporary" in columns:
+        logger.info("Столбец is_temporary уже существует, миграция пропущена")
+        return
+    await conn.execute(
+        "ALTER TABLE recipes ADD COLUMN is_temporary INTEGER NOT NULL DEFAULT 0"
+    )
+
+
 MIGRATIONS: dict[int, Migration] = {
     1: _migration_1_initialise_schema_version,
+    2: _migration_2_add_recipe_status,
 }
 
 CURRENT_SCHEMA_VERSION = max(MIGRATIONS.keys(), default=0)
@@ -155,7 +173,8 @@ class Database:
             CREATE TABLE IF NOT EXISTS recipes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
-                output_quantity REAL NOT NULL DEFAULT 1
+                output_quantity REAL NOT NULL DEFAULT 1,
+                is_temporary INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS recipe_components (
@@ -246,12 +265,15 @@ class Database:
         name: str,
         output_quantity: Decimal,
         components: Iterable[RecipeComponent],
+        *,
+        is_temporary: bool = False,
     ) -> None:
         if self._conn is None:
             raise RuntimeError("Database connection is not initialised")
 
         async with self._lock:
             logger.info("Сохраняю рецепт '%s'", name)
+            temporary_flag = 1 if is_temporary else 0
             cursor = await self._conn.execute(
                 "SELECT id FROM recipes WHERE name = ?",
                 (name,),
@@ -262,8 +284,11 @@ class Database:
             if row is None:
                 logger.debug("Рецепт '%s' не найден, создаю новую запись", name)
                 cursor = await self._conn.execute(
-                    "INSERT INTO recipes(name, output_quantity) VALUES(?, ?)",
-                    (name, float(output_quantity)),
+                    """
+                    INSERT INTO recipes(name, output_quantity, is_temporary)
+                    VALUES(?, ?, ?)
+                    """,
+                    (name, float(output_quantity), temporary_flag),
                 )
                 recipe_id = cursor.lastrowid
                 await cursor.close()
@@ -273,8 +298,12 @@ class Database:
                     "Рецепт '%s' найден (id=%s), обновляю существующую запись", name, recipe_id
                 )
                 await self._conn.execute(
-                    "UPDATE recipes SET output_quantity = ? WHERE id = ?",
-                    (float(output_quantity), recipe_id),
+                    """
+                    UPDATE recipes
+                    SET output_quantity = ?, is_temporary = ?
+                    WHERE id = ?
+                    """,
+                    (float(output_quantity), temporary_flag, recipe_id),
                 )
                 await self._conn.execute(
                     "DELETE FROM recipe_components WHERE recipe_id = ?",
@@ -310,13 +339,60 @@ class Database:
             await self._conn.commit()
             logger.info("Рецепт '%s' сохранён", name)
 
+    async def set_recipe_temporary(self, name: str, is_temporary: bool) -> bool:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        async with self._lock:
+            logger.info(
+                "Обновляю статус временного рецепта '%s': %s",
+                name,
+                is_temporary,
+            )
+            cursor = await self._conn.execute(
+                "UPDATE recipes SET is_temporary = ? WHERE name = ?",
+                (1 if is_temporary else 0, name),
+            )
+            await self._conn.commit()
+            updated = cursor.rowcount > 0
+            await cursor.close()
+            if not updated:
+                logger.warning(
+                    "Рецепт '%s' не найден при обновлении статуса временности",
+                    name,
+                )
+            return updated
+
+    async def delete_recipe(self, name: str) -> bool:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        async with self._lock:
+            logger.info("Удаляю рецепт '%s'", name)
+            cursor = await self._conn.execute(
+                "DELETE FROM recipes WHERE name = ?",
+                (name,),
+            )
+            await self._conn.commit()
+            deleted = cursor.rowcount > 0
+            await cursor.close()
+            if deleted:
+                logger.info("Рецепт '%s' удалён", name)
+            else:
+                logger.warning("Рецепт '%s' не найден для удаления", name)
+            return deleted
+
     async def get_recipe(self, name: str) -> Optional[dict[str, Any]]:
         if self._conn is None:
             raise RuntimeError("Database connection is not initialised")
         logger.debug("Получаю рецепт '%s'", name)
 
         cursor = await self._conn.execute(
-            "SELECT id, name, output_quantity FROM recipes WHERE name = ?",
+            """
+            SELECT id, name, output_quantity, is_temporary
+            FROM recipes
+            WHERE name = ?
+            """,
             (name,),
         )
         row = await cursor.fetchone()
@@ -341,6 +417,7 @@ class Database:
             "id": row["id"],
             "name": row["name"],
             "output_quantity": row["output_quantity"],
+            "is_temporary": bool(row["is_temporary"]),
             "components": components,
         }
         logger.debug(

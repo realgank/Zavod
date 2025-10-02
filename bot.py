@@ -53,6 +53,106 @@ RECIPE_FEED_CHANNEL_ID = 1423404992273977364
 RESTART_LOG_CHANNEL_ID = 1423405721998987306
 
 
+def _replace_status_line(content: Optional[str], new_status: str) -> str:
+    lines = (content or "").splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith("Статус:"):
+            lines[index] = f"Статус: {new_status}"
+            break
+    else:
+        lines.append(f"Статус: {new_status}")
+    return "\n".join(lines)
+
+
+class RecipeApprovalView(discord.ui.View):
+    def __init__(self, recipe_name: str) -> None:
+        super().__init__(timeout=None)
+        self.recipe_name = recipe_name
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Действие доступно только на сервере.", ephemeral=True
+            )
+            return False
+
+        permissions = interaction.user.guild_permissions
+        if not permissions.manage_guild:
+            await interaction.response.send_message(
+                "Подтверждать или удалять рецепты могут только пользователи с правом управления сервером.",
+                ephemeral=True,
+            )
+            return False
+
+        return True
+
+    @discord.ui.button(
+        label="Подтвердить рецепт",
+        style=discord.ButtonStyle.success,
+        custom_id="recipe-approve",
+    )
+    async def confirm_button(  # type: ignore[override]
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        del button
+
+        logger.info(
+            "Пользователь %s подтвердил рецепт '%s'", interaction.user, self.recipe_name
+        )
+        updated = await database.set_recipe_temporary(self.recipe_name, False)
+        if not updated:
+            await interaction.response.send_message(
+                "Рецепт не найден или уже удалён.", ephemeral=True
+            )
+            return
+
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+
+        updated_content = _replace_status_line(
+            interaction.message.content,
+            f"подтверждён пользователем {interaction.user.mention}",
+        )
+        await interaction.response.edit_message(content=updated_content, view=self)
+        await interaction.followup.send(
+            f"Рецепт '{self.recipe_name}' подтверждён.", ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Удалить рецепт",
+        style=discord.ButtonStyle.danger,
+        custom_id="recipe-delete",
+    )
+    async def delete_button(  # type: ignore[override]
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        del button
+
+        logger.info(
+            "Пользователь %s удаляет рецепт '%s'", interaction.user, self.recipe_name
+        )
+        deleted = await database.delete_recipe(self.recipe_name)
+        if not deleted:
+            await interaction.response.send_message(
+                "Рецепт не найден или уже удалён.", ephemeral=True
+            )
+            return
+
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+
+        updated_content = _replace_status_line(
+            interaction.message.content,
+            f"удалён пользователем {interaction.user.mention}",
+        )
+        await interaction.response.edit_message(content=updated_content, view=self)
+        await interaction.followup.send(
+            f"Рецепт '{self.recipe_name}' удалён.", ephemeral=True
+        )
+
+
 def _load_env_file(env_path: Path) -> None:
     """Load environment variables from a .env file if it exists."""
 
@@ -365,7 +465,11 @@ async def _restart_service_if_configured() -> Optional[str]:
 
 
 async def _notify_recipe_added(
-    recipe_name: str, *, output_quantity: Decimal, component_count: int
+    recipe_name: str,
+    *,
+    output_quantity: Decimal,
+    component_count: int,
+    is_temporary: bool = False,
 ) -> None:
     """Send a notification to the recipe feed channel about a new or updated recipe."""
 
@@ -386,16 +490,26 @@ async def _notify_recipe_added(
         logger.warning("Канал с ID %s для уведомлений о рецептах не найден", channel_id)
         return
 
-    message = "\n".join(
-        [
-            f"Рецепт '{recipe_name}' был добавлен или обновлён.",
-            f"Выход за цикл: {output_quantity}",
-            f"Количество компонентов: {component_count}",
-        ]
-    )
+    message_lines = [
+        f"Рецепт '{recipe_name}' был добавлен или обновлён.",
+        f"Выход за цикл: {output_quantity}",
+        f"Количество компонентов: {component_count}",
+    ]
+    if is_temporary:
+        status_line = "Статус: временный. Подтвердите или удалите рецепт."
+    else:
+        status_line = "Статус: подтверждён."
+    message_lines.append(status_line)
+    message = "\n".join(message_lines)
+
+    view: Optional[discord.ui.View]
+    if is_temporary:
+        view = RecipeApprovalView(recipe_name)
+    else:
+        view = None
 
     try:
-        await channel.send(message)
+        await channel.send(message, view=view)
     except discord.HTTPException as exc:
         logger.warning(
             "Не удалось отправить уведомление о рецепте '%s' в канал %s: %s",
@@ -575,6 +689,7 @@ async def add_recipe_command(
             name=recipe_name,
             output_quantity=Decimal(output_quantity),
             components=components,
+            is_temporary=True,
         )
     except ValueError as exc:
         await interaction.followup.send(
@@ -592,7 +707,13 @@ async def add_recipe_command(
         "Рецепт '%s' успешно сохранён, обновлено %s ресурсов", recipe_name, len(components)
     )
     await interaction.followup.send(
-        f"Рецепт '{recipe_name}' успешно сохранён. Обновлены цены {len(components)} ресурсов.",
+        "\n".join(
+            [
+                f"Рецепт '{recipe_name}' сохранён как временный.",
+                "Обновлены цены {count} ресурсов.".format(count=len(components)),
+                f"Подтверждение доступно в канале <#{RECIPE_FEED_CHANNEL_ID}>.",
+            ]
+        ),
         ephemeral=False,
     )
 
@@ -600,6 +721,7 @@ async def add_recipe_command(
         recipe_name,
         output_quantity=Decimal(output_quantity),
         component_count=len(components),
+        is_temporary=True,
     )
 
 
