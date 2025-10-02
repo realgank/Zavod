@@ -111,14 +111,43 @@ def _parse_recipe_table(raw_table: str) -> list[RecipeComponent]:
         "valuation",
         "cost",
     }
+    inline_pattern = re.compile(
+        r"(?<!\S)(\d+)\s+(.+?)\s+([0-9]+(?:[.][0-9]+)?)\s+([0-9]+(?:[.][0-9]+)?)(?=(?:\s+\d+\s)|\s*$)"
+    )
 
     for line in lines:
         normalised = line.replace("\u200b", "")  # remove zero-width spaces from Discord tables
-        lower_normalised = normalised.lower()
-        if any(keyword in lower_normalised for keyword in header_keywords):
+        if not normalised:
+            continue
+
+        if not re.search(r"\d", normalised):
+            lower_normalised = normalised.lower()
+            if any(keyword in lower_normalised for keyword in header_keywords):
+                continue
+
+        matches = list(inline_pattern.finditer(normalised))
+        if matches:
+            for match in matches:
+                resource_name = match.group(2).strip()
+                quantity = parse_decimal(match.group(3))
+                total_cost = parse_decimal(match.group(4))
+                if quantity <= 0:
+                    raise ValueError("Количество ресурса должно быть больше нуля")
+                unit_price = total_cost / quantity
+                logger.debug(
+                    "Обработана строка рецепта: ресурс=%s, количество=%s, цена=%s",
+                    resource_name,
+                    quantity,
+                    unit_price,
+                )
+                components.append(RecipeComponent(resource_name, quantity, unit_price))
             continue
 
         parts = [part.strip() for part in splitter.split(normalised) if part.strip()]
+        if not parts:
+            continue
+        if all(part.lower() in header_keywords for part in parts):
+            continue
 
         if len(parts) < 4:
             raise ValueError(
