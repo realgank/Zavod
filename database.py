@@ -117,6 +117,7 @@ class Database:
             await cursor.close()
 
             if row is None:
+                logger.debug("Рецепт '%s' не найден, создаю новую запись", name)
                 cursor = await self._conn.execute(
                     "INSERT INTO recipes(name, output_quantity) VALUES(?, ?)",
                     (name, float(output_quantity)),
@@ -125,6 +126,9 @@ class Database:
                 await cursor.close()
             else:
                 recipe_id = row["id"]
+                logger.debug(
+                    "Рецепт '%s' найден (id=%s), обновляю существующую запись", name, recipe_id
+                )
                 await self._conn.execute(
                     "UPDATE recipes SET output_quantity = ? WHERE id = ?",
                     (float(output_quantity), recipe_id),
@@ -190,12 +194,19 @@ class Database:
         )
         components = [dict(resource_name=r["resource_name"], quantity=r["quantity"]) for r in await cursor.fetchall()]
         await cursor.close()
-        return {
+        recipe_data = {
             "id": row["id"],
             "name": row["name"],
             "output_quantity": row["output_quantity"],
             "components": components,
         }
+        logger.debug(
+            "Рецепт '%s' получен: выход=%s, компонентов=%s",
+            name,
+            recipe_data["output_quantity"],
+            len(components),
+        )
+        return recipe_data
 
     async def get_resource_unit_price(self, name: str) -> Optional[float]:
         if self._conn is None:
@@ -209,8 +220,11 @@ class Database:
         row = await cursor.fetchone()
         await cursor.close()
         if row is None:
+            logger.info("Цена для ресурса '%s' не найдена", name)
             return None
-        return row["unit_price"]
+        unit_price = row["unit_price"]
+        logger.info("Получена цена ресурса '%s': %s", name, unit_price)
+        return unit_price
 
     async def set_global_efficiency(self, efficiency: Decimal) -> None:
         if self._conn is None:
@@ -225,6 +239,7 @@ class Database:
                 ("global_efficiency", str(efficiency)),
             )
             await self._conn.commit()
+            logger.debug("Глобальная эффективность обновлена в базе данных")
 
     async def get_global_efficiency(self) -> Decimal:
         if self._conn is None:
@@ -237,10 +252,19 @@ class Database:
         row = await cursor.fetchone()
         await cursor.close()
         if row is None:
+            logger.warning(
+                "Значение глобальной эффективности отсутствует в таблице config, используется значение по умолчанию"
+            )
             return Decimal("100")
         try:
-            return Decimal(row["value"])
+            value = Decimal(row["value"])
+            logger.debug("Получено значение глобальной эффективности %s", value)
+            return value
         except (InvalidOperation, TypeError):
+            logger.error(
+                "Не удалось преобразовать значение глобальной эффективности '%s', используется значение по умолчанию",
+                row["value"],
+            )
             return Decimal("100")
 
     async def calculate_recipe_cost(
@@ -272,6 +296,10 @@ class Database:
                 )
             nested_recipe = await self.get_recipe(resource_name)
             if nested_recipe is not None:
+                logger.debug(
+                    "Ресурс '%s' является рецептом, рассчитываю стоимость вложенного рецепта",
+                    resource_name,
+                )
                 visiting.add(resource_name)
                 cost_per_run = await recipe_cost(nested_recipe, visiting)
                 visiting.remove(resource_name)
@@ -287,9 +315,19 @@ class Database:
                 raise ResourcePriceNotFoundError(
                     f"No price registered for resource '{resource_name}'"
                 )
+            logger.debug(
+                "Используется сохранённая цена ресурса '%s': %s",
+                resource_name,
+                price,
+            )
             return Decimal(str(price))
 
         async def recipe_cost(recipe: dict[str, Any], visiting: set[str]) -> Decimal:
+            logger.debug(
+                "Начинаю расчёт стоимости рецепта '%s' для %s компонентов",
+                recipe["name"],
+                len(recipe["components"]),
+            )
             total = Decimal("0")
             for component in recipe["components"]:
                 component_quantity = Decimal(str(component["quantity"])) * multiplier
@@ -309,6 +347,14 @@ class Database:
         unit_cost = total_run_cost / output_quantity
         logger.info(
             "Стоимость рецепта '%s': цикл=%s, единица=%s", recipe_name, total_run_cost, unit_cost
+        )
+        logger.debug(
+            "Финальный расчёт рецепта '%s': эффективность=%s, количество=%s, стоимость цикла=%s, стоимость единицы=%s",
+            recipe_name,
+            efficiency,
+            output_quantity,
+            total_run_cost,
+            unit_cost,
         )
         return {
             "efficiency": efficiency,

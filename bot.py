@@ -75,6 +75,7 @@ def _parse_recipe_table(raw_table: str) -> list[RecipeComponent]:
 async def _read_attachment_content(message: discord.Message) -> Optional[str]:
     logger.debug("Проверяю наличие вложений в сообщении %s", message.id)
     if not message.attachments:
+        logger.debug("В сообщении %s вложений не найдено", message.id)
         return None
     attachment = message.attachments[0]
     logger.info(
@@ -82,9 +83,17 @@ async def _read_attachment_content(message: discord.Message) -> Optional[str]:
     )
     if attachment.size > 5 * 1024 * 1024:
         raise ValueError("Превышен максимальный размер вложения (5 МБ)")
+    logger.debug("Начинаю чтение содержимого вложения '%s'", attachment.filename)
     data = await attachment.read()
+    logger.debug(
+        "Чтение вложения '%s' завершено, получено %s байт",
+        attachment.filename,
+        len(data),
+    )
     try:
-        return data.decode("utf-8")
+        decoded = data.decode("utf-8")
+        logger.debug("Вложение '%s' успешно декодировано в UTF-8", attachment.filename)
+        return decoded
     except UnicodeDecodeError as exc:
         raise ValueError("Не удалось декодировать вложение как UTF-8 текст") from exc
 
@@ -142,6 +151,11 @@ async def _pull_latest_code() -> str:
             pass
     if process.returncode != 0:
         error_output = stderr.decode().strip() or stdout.decode().strip()
+        logger.error(
+            "Команда git pull завершилась с ошибкой %s: %s",
+            process.returncode,
+            error_output,
+        )
         raise RuntimeError(error_output or "Не удалось выполнить git pull")
     output = stdout.decode().strip()
     if not output:
