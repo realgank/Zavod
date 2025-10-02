@@ -6,6 +6,7 @@ import shlex
 import tempfile
 from asyncio import subprocess
 from decimal import Decimal
+from pathlib import Path
 from typing import Optional
 
 import discord
@@ -32,6 +33,46 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 database = Database()
+
+
+def _load_env_file(env_path: Path) -> None:
+    """Load environment variables from a .env file if it exists."""
+
+    if not env_path.exists():
+        logger.debug("Файл окружения %s не найден, пропускаю загрузку", env_path)
+        return
+
+    logger.info("Загружаю переменные окружения из %s", env_path)
+    try:
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                logger.debug(
+                    "Пропускаю строку без разделителя '=' в файле окружения: %s",
+                    raw_line,
+                )
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not key:
+                logger.debug(
+                    "Пропускаю строку с пустым ключом в файле окружения: %s",
+                    raw_line,
+                )
+                continue
+            if key in os.environ:
+                logger.debug(
+                    "Переменная окружения %s уже установлена, значение из файла пропущено",
+                    key,
+                )
+                continue
+            os.environ[key] = value.strip()
+    except OSError as exc:
+        logger.warning(
+            "Не удалось прочитать файл окружения %s: %s", env_path, exc
+        )
 
 
 def _parse_recipe_table(raw_table: str) -> list[RecipeComponent]:
@@ -380,6 +421,9 @@ async def _run_bot(token: str) -> None:
 
 
 def main() -> None:
+    env_file = Path(__file__).resolve().parent / ".env"
+    _load_env_file(env_file)
+
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         raise RuntimeError(
