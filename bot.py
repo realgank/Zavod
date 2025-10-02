@@ -21,7 +21,12 @@ from database import (
     parse_decimal,
 )
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
+logger = logging.getLogger(__name__)
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -30,6 +35,7 @@ database = Database()
 
 
 def _parse_recipe_table(raw_table: str) -> list[RecipeComponent]:
+    logger.debug("Начинаю разбор таблицы рецепта")
     lines = [line.strip() for line in raw_table.splitlines() if line.strip()]
     components: list[RecipeComponent] = []
     splitter = re.compile(r"\t|\s{2,}")
@@ -53,16 +59,27 @@ def _parse_recipe_table(raw_table: str) -> list[RecipeComponent]:
         if quantity <= 0:
             raise ValueError("Количество ресурса должно быть больше нуля")
         unit_price = total_cost / quantity
+        logger.debug(
+            "Обработана строка рецепта: ресурс=%s, количество=%s, цена=%s",
+            resource_name,
+            quantity,
+            unit_price,
+        )
         components.append(RecipeComponent(resource_name, quantity, unit_price))
     if not components:
         raise ValueError("Не удалось найти ни одной строки с компонентами рецепта")
+    logger.info("Разобрано %s компонентов рецепта", len(components))
     return components
 
 
 async def _read_attachment_content(message: discord.Message) -> Optional[str]:
+    logger.debug("Проверяю наличие вложений в сообщении %s", message.id)
     if not message.attachments:
         return None
     attachment = message.attachments[0]
+    logger.info(
+        "Найдено вложение '%s' размером %s байт", attachment.filename, attachment.size
+    )
     if attachment.size > 5 * 1024 * 1024:
         raise ValueError("Превышен максимальный размер вложения (5 МБ)")
     data = await attachment.read()
@@ -73,6 +90,7 @@ async def _read_attachment_content(message: discord.Message) -> Optional[str]:
 
 
 async def _pull_latest_code() -> str:
+    logger.info("Запускаю обновление кода из GitHub")
     env = os.environ.copy()
     github_username = env.get("GITHUB_USERNAME")
     github_token = env.get("GITHUB_TOKEN")
@@ -128,12 +146,15 @@ async def _pull_latest_code() -> str:
     output = stdout.decode().strip()
     if not output:
         output = "Изменений нет"
+    logger.info("Обновление кода завершено: %s", output)
     return output
 
 
 @bot.event
 async def setup_hook() -> None:
+    logger.info("Запуск setup_hook: подключаюсь к базе данных")
     await database.connect()
+    logger.info("Подключение к базе данных завершено")
 
 
 @bot.command(name="add_recipe")
@@ -147,6 +168,12 @@ async def add_recipe_command(
 ) -> None:
     """Добавляет или обновляет рецепт."""
 
+    logger.info(
+        "Получена команда add_recipe: пользователь=%s, рецепт=%s, количество=%s",
+        ctx.author,
+        recipe_name,
+        output_quantity,
+    )
     if output_quantity is None:
         output_quantity = 1
     if output_quantity <= 0:
@@ -178,6 +205,9 @@ async def add_recipe_command(
         await ctx.send(f"Произошла непредвиденная ошибка: {exc}")
         return
 
+    logger.info(
+        "Рецепт '%s' успешно сохранён, обновлено %s ресурсов", recipe_name, len(components)
+    )
     await ctx.send(f"Рецепт '{recipe_name}' успешно сохранён. Обновлены цены {len(components)} ресурсов.")
 
 
@@ -190,6 +220,12 @@ async def recipe_price_command(
     """Рассчитывает стоимость рецепта с учётом эффективности."""
 
     efficiency_decimal: Optional[Decimal]
+    logger.info(
+        "Получена команда price: пользователь=%s, рецепт=%s, эффективность=%s",
+        ctx.author,
+        recipe_name,
+        efficiency,
+    )
     if efficiency is None:
         efficiency_decimal = None
     else:
@@ -219,6 +255,12 @@ async def recipe_price_command(
     unit_cost = result["unit_cost"]
     output_quantity = result["output_quantity"]
 
+    logger.info(
+        "Расчёт стоимости рецепта '%s' завершён: эффективность=%s, стоимость цикла=%s",
+        recipe_name,
+        effective_efficiency,
+        run_cost,
+    )
     await ctx.send(
         "\n".join(
             [
@@ -236,10 +278,16 @@ async def recipe_price_command(
 async def resource_price_command(ctx: commands.Context, *, resource_name: str) -> None:
     """Показывает последнюю сохранённую цену ресурса."""
 
+    logger.info(
+        "Получена команда resource_price: пользователь=%s, ресурс=%s",
+        ctx.author,
+        resource_name,
+    )
     price = await database.get_resource_unit_price(resource_name)
     if price is None:
         await ctx.send(f"Цена для ресурса '{resource_name}' не найдена")
         return
+    logger.info("Цена для ресурса '%s' составила %s", resource_name, price)
     await ctx.send(f"Текущая цена '{resource_name}': {price:,.2f}")
 
 
@@ -248,6 +296,11 @@ async def resource_price_command(ctx: commands.Context, *, resource_name: str) -
 async def set_efficiency_command(ctx: commands.Context, value: float) -> None:
     """Устанавливает глобальную эффективность по умолчанию."""
 
+    logger.info(
+        "Получена команда set_efficiency: пользователь=%s, значение=%s",
+        ctx.author,
+        value,
+    )
     try:
         efficiency = parse_decimal(str(value))
     except ValueError:
@@ -258,6 +311,7 @@ async def set_efficiency_command(ctx: commands.Context, value: float) -> None:
         return
 
     await database.set_global_efficiency(efficiency)
+    logger.info("Установлена глобальная эффективность: %s", efficiency)
     await ctx.send(f"Глобальная эффективность установлена на {efficiency}%")
 
 
@@ -265,7 +319,11 @@ async def set_efficiency_command(ctx: commands.Context, value: float) -> None:
 async def global_efficiency_command(ctx: commands.Context) -> None:
     """Показывает текущую глобальную эффективность."""
 
+    logger.info(
+        "Получена команда global_efficiency: пользователь=%s", ctx.author
+    )
     value = await database.get_global_efficiency()
+    logger.info("Текущая глобальная эффективность: %s", value)
     await ctx.send(f"Текущая глобальная эффективность: {value}%")
 
 
@@ -274,6 +332,7 @@ async def global_efficiency_command(ctx: commands.Context) -> None:
 async def update_bot_command(ctx: commands.Context) -> None:
     """Обновляет код бота из GitHub репозитория."""
 
+    logger.info("Получена команда update_bot от пользователя %s", ctx.author)
     status_message = await ctx.send("Запускаю обновление из GitHub...")
     try:
         result = await _pull_latest_code()
@@ -284,21 +343,25 @@ async def update_bot_command(ctx: commands.Context) -> None:
         message = f"Не удалось обновить бота: {exc}"
         if len(message) > 1900:
             message = message[:1900] + "…"
+        logger.warning("Обновление кода завершилось с ошибкой: %s", exc)
         await status_message.edit(content=message)
         return
 
     if len(result) > 1900:
         result = result[:1900] + "…"
+    logger.info("Команда update_bot завершилась успешно")
     await status_message.edit(
         content="Успешно обновлено из GitHub. Итог:\n" + result
     )
 
 
 async def _run_bot(token: str) -> None:
+    logger.info("Запускаю бота")
     try:
         async with bot:
             await bot.start(token)
     finally:
+        logger.info("Останавливаю бота и закрываю соединение с базой данных")
         await database.close()
 
 
@@ -309,17 +372,20 @@ def main() -> None:
             "Не задан токен Discord. Установите переменную окружения DISCORD_TOKEN."
         )
 
+    logger.info("Проверяю наличие файла базы данных по пути %s", database.path)
     if not os.path.exists(database.path):
-        logging.info(
+        logger.info(
             "Файл базы данных '%s' не найден. Запускаю инициализацию базы данных.",
             database.path,
         )
         asyncio.run(initialise_database(database.path))
+    else:
+        logger.info("Файл базы данных найден, инициализация не требуется")
 
     try:
         asyncio.run(_run_bot(token))
     except KeyboardInterrupt:
-        logging.info("Остановка бота")
+        logger.info("Остановка бота по сигналу KeyboardInterrupt")
 
 
 if __name__ == "__main__":
