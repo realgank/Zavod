@@ -17,6 +17,7 @@ from database import (
     RecipeComponent,
     RecipeNotFoundError,
     ResourcePriceNotFoundError,
+    initialise_database,
     parse_decimal,
 )
 
@@ -307,6 +308,13 @@ def main() -> None:
         raise RuntimeError(
             "Не задан токен Discord. Установите переменную окружения DISCORD_TOKEN."
         )
+
+    if not os.path.exists(database.path):
+        logging.info(
+            "Файл базы данных '%s' не найден. Запускаю инициализацию базы данных.",
+            database.path,
+        )
+        asyncio.run(initialise_database(database.path))
 
     try:
         asyncio.run(_run_bot(token))

@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Optional
 
 import aiosqlite
@@ -31,6 +32,12 @@ class Database:
         self._path = path
         self._conn: Optional[aiosqlite.Connection] = None
         self._lock = asyncio.Lock()
+
+    @property
+    def path(self) -> str:
+        """Return the filesystem path of the SQLite database."""
+
+        return self._path
 
     async def connect(self) -> None:
         if self._conn is not None:
@@ -280,3 +287,25 @@ def parse_decimal(value: str) -> Decimal:
         return Decimal(value)
     except InvalidOperation as exc:
         raise ValueError(f"Cannot parse decimal value from '{value}'") from exc
+
+
+async def initialise_database(path: str = "zavod.db") -> None:
+    """Ensure that the SQLite database file and schema exist.
+
+    This helper is useful when the application is launched outside of Discord's
+    lifecycle and the database file may not yet be present on disk.
+    """
+
+    path_obj = Path(path)
+    if path_obj.parent and not path_obj.parent.exists():
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+
+    db = Database(str(path_obj))
+    try:
+        await db.connect()
+    finally:
+        await db.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(initialise_database())
