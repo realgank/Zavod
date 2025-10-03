@@ -776,6 +776,22 @@ async def recipe_price_command(
     run_cost = result["run_cost"]
     unit_cost = result["unit_cost"]
     output_quantity = result["output_quantity"]
+    components = result["components"]
+
+    resource_lines = ["Ресурсы:"]
+    if components:
+        for component in components:
+            quantity_display = format(component["quantity"], ",")
+            resource_lines.append(
+                " • {name}: {quantity} × {unit:,.2f} = {total:,.2f}".format(
+                    name=component["resource_name"],
+                    quantity=quantity_display,
+                    unit=component["unit_cost"],
+                    total=component["total_cost"],
+                )
+            )
+    else:
+        resource_lines.append(" • Нет компонентов")
 
     logger.info(
         "Расчёт стоимости рецепта '%s' завершён: эффективность=%s, стоимость цикла=%s",
@@ -791,6 +807,7 @@ async def recipe_price_command(
                 f"Количество на цикл: {output_quantity}",
                 f"Стоимость цикла: {run_cost:,.2f}",
                 f"Стоимость единицы: {unit_cost:,.2f}",
+                *resource_lines,
             ]
         )
     )

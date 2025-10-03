@@ -598,7 +598,7 @@ class Database:
         self,
         recipe_name: str,
         efficiency: Optional[Decimal] = None,
-    ) -> dict[str, Decimal]:
+    ) -> dict[str, Any]:
         if self._conn is None:
             raise RuntimeError("Database connection is not initialised")
 
@@ -628,7 +628,9 @@ class Database:
                     resource_name,
                 )
                 visiting.add(resource_name)
-                cost_per_run = await recipe_cost(nested_recipe, visiting)
+                cost_per_run, _ = await recipe_cost(
+                    nested_recipe, visiting, collect_components=False
+                )
                 visiting.remove(resource_name)
                 output_quantity = Decimal(str(nested_recipe["output_quantity"]))
                 if output_quantity <= 0:
@@ -649,17 +651,24 @@ class Database:
             )
             return Decimal(str(price))
 
-        async def recipe_cost(recipe: dict[str, Any], visiting: set[str]) -> Decimal:
+        async def recipe_cost(
+            recipe: dict[str, Any],
+            visiting: set[str],
+            *,
+            collect_components: bool,
+        ) -> tuple[Decimal, list[dict[str, Decimal]]]:
             logger.debug(
                 "Начинаю расчёт стоимости рецепта '%s' для %s компонентов",
                 recipe["name"],
                 len(recipe["components"]),
             )
             total = Decimal("0")
+            breakdown: list[dict[str, Decimal]] = []
             for component in recipe["components"]:
                 component_quantity = Decimal(str(component["quantity"])) * multiplier
                 component_cost = await resource_cost(component["resource_name"], visiting)
-                total += component_quantity * component_cost
+                total_cost = component_quantity * component_cost
+                total += total_cost
                 logger.debug(
                     "Компонент '%s': количество=%s, цена=%s, промежуточная сумма=%s",
                     component["resource_name"],
@@ -667,9 +676,20 @@ class Database:
                     component_cost,
                     total,
                 )
-            return total
+                if collect_components:
+                    breakdown.append(
+                        {
+                            "resource_name": component["resource_name"],
+                            "quantity": component_quantity,
+                            "unit_cost": component_cost,
+                            "total_cost": total_cost,
+                        }
+                    )
+            return total, breakdown
 
-        total_run_cost = await recipe_cost(base_recipe, {recipe_name})
+        total_run_cost, breakdown = await recipe_cost(
+            base_recipe, {recipe_name}, collect_components=True
+        )
         output_quantity = Decimal(str(base_recipe["output_quantity"]))
         unit_cost = total_run_cost / output_quantity
         logger.info(
@@ -688,6 +708,7 @@ class Database:
             "run_cost": total_run_cost,
             "unit_cost": unit_cost,
             "output_quantity": output_quantity,
+            "components": breakdown,
         }
 
 
