@@ -168,11 +168,9 @@ async def recipe_price_command(
         for component in components:
             quantity_display = format(component["quantity"], ",")
             resource_lines.append(
-                " • {name}: {quantity} × {unit:,.2f} = {total:,.2f}".format(
+                " • {name}: {quantity}".format(
                     name=component["resource_name"],
                     quantity=quantity_display,
-                    unit=component["unit_cost"],
-                    total=component["total_cost"],
                 )
             )
     else:
@@ -190,9 +188,9 @@ async def recipe_price_command(
                 f"Расчёт для '{recipe_name}'",
                 f"Эффективность: {effective_efficiency}%",
                 f"Количество на цикл: {output_quantity}",
-                f"Стоимость цикла: {run_cost:,.2f}",
                 f"Стоимость единицы: {unit_cost:,.2f}",
                 *resource_lines,
+                f"Итого за все: {run_cost:,.2f}",
             ]
         )
     )
