@@ -456,24 +456,24 @@ class GraphRequestView(discord.ui.View):
         view = GraphShipSelectionView(channel_id=channel_id, ship_names=ship_names)
         await interaction.response.send_message(
             "Выберите корабль для крафта:", view=view, ephemeral=True
+
         )
 
 
 class GraphShipSelect(discord.ui.Select):
-    def __init__(
-        self,
-        *,
-        channel_id: int,
-        ship_names: list[str],
-        page: int,
-    ) -> None:
-        self._channel_id = channel_id
-        self._ship_names = ship_names
-        self._total_pages = max(1, math.ceil(len(ship_names) / 25))
-        self._page = page
-        options = self._build_options()
+    def __init__(self, *, channel_id: int, ship_names: list[str]) -> None:
+        options: list[discord.SelectOption] = []
+        limited_names = ship_names[:25]
+        if len(ship_names) > 25:
+            logger.warning(
+                "Список кораблей графика содержит %s элементов, отображаются только первые 25",
+                len(ship_names),
+            )
+        for name in limited_names:
+            label = name[:100] or name
+            options.append(discord.SelectOption(label=label, value=name))
         super().__init__(
-            placeholder=self._build_placeholder(),
+            placeholder="Выберите корабль из графика",
             min_values=1,
             max_values=1,
             options=options,
