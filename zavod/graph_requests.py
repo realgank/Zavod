@@ -111,26 +111,39 @@ def _normalise_ship_name(name: object) -> Optional[str]:
 
 async def get_graph_ship_names() -> list[str]:
     raw_value = await database.get_config_value(GRAPH_REQUEST_SHIP_SCHEDULE_CONFIG_KEY)
-    if not raw_value:
-        return []
-    try:
-        decoded = json.loads(raw_value)
-    except json.JSONDecodeError:
-        logger.warning(
-            "Не удалось разобрать список кораблей крафта из значения: %s", raw_value
-        )
-        return []
 
     unique: list[str] = []
     seen: set[str] = set()
-    for item in decoded:
-        name = _normalise_ship_name(item)
-        if not name:
-            continue
-        if name in seen:
-            continue
-        unique.append(name)
-        seen.add(name)
+
+    if raw_value:
+        try:
+            decoded = json.loads(raw_value)
+        except json.JSONDecodeError:
+            logger.warning(
+                "Не удалось разобрать список кораблей крафта из значения: %s", raw_value
+            )
+        else:
+            for item in decoded:
+                name = _normalise_ship_name(item)
+                if not name or name in seen:
+                    continue
+                unique.append(name)
+                seen.add(name)
+
+    try:
+        recipe_names = await database.get_all_recipe_names()
+    except Exception as exc:  # pragma: no cover - защита от ошибок БД
+        logger.warning(
+            "Не удалось получить список рецептов для графика кораблей: %s", exc
+        )
+    else:
+        for item in recipe_names:
+            name = _normalise_ship_name(item)
+            if not name or name in seen:
+                continue
+            unique.append(name)
+            seen.add(name)
+
     return unique
 
 
@@ -461,23 +474,40 @@ class GraphRequestView(discord.ui.View):
 
 
 class GraphShipSelect(discord.ui.Select):
-    def __init__(self, *, channel_id: int, ship_names: list[str]) -> None:
-        options: list[discord.SelectOption] = []
-        limited_names = ship_names[:25]
+    def __init__(
+        self,
+        *,
+        channel_id: int,
+        ship_names: list[str],
+        page: int = 0,
+    ) -> None:
+        self._channel_id = channel_id
+        self._ship_names = ship_names
+        self._total_pages = max(1, math.ceil(len(ship_names) / 25))
+        self._page = min(max(page, 0), self._total_pages - 1)
+
         if len(ship_names) > 25:
-            logger.warning(
-                "Список кораблей графика содержит %s элементов, отображаются только первые 25",
+            logger.info(
+                "Список кораблей графика содержит %s элементов, доступно %s страниц",
                 len(ship_names),
+                self._total_pages,
             )
-        for name in limited_names:
-            label = name[:100] or name
-            options.append(discord.SelectOption(label=label, value=name))
+
+        options = self._build_options()
         super().__init__(
-            placeholder="Выберите корабль из графика",
+            placeholder=self._build_placeholder(),
             min_values=1,
             max_values=1,
             options=options,
         )
+
+    @property
+    def total_pages(self) -> int:
+        return self._total_pages
+
+    @property
+    def page(self) -> int:
+        return self._page
 
     def _build_options(self) -> list[discord.SelectOption]:
         start = self._page * 25
@@ -494,7 +524,7 @@ class GraphShipSelect(discord.ui.Select):
         return "Выберите корабль для крафта"
 
     def update_page(self, page: int) -> None:
-        self._page = page
+        self._page = min(max(page, 0), self._total_pages - 1)
         self.options = self._build_options()
         self.placeholder = self._build_placeholder()
         self.values = []
@@ -511,13 +541,13 @@ class GraphShipSelect(discord.ui.Select):
 class GraphShipSelectionView(discord.ui.View):
     def __init__(self, *, channel_id: int, ship_names: list[str]) -> None:
         super().__init__(timeout=300)
-        self._page = 0
-        self._total_pages = max(1, math.ceil(len(ship_names) / 25))
         self._select = GraphShipSelect(
             channel_id=channel_id,
             ship_names=ship_names,
-            page=self._page,
+            page=0,
         )
+        self._page = self._select.page
+        self._total_pages = self._select.total_pages
         self.add_item(self._select)
         if self._total_pages > 1:
             self._prev_button = GraphShipPageButton(direction=-1)

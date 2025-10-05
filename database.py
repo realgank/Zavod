@@ -524,6 +524,26 @@ class Database:
         )
         return names
 
+    async def get_all_recipe_names(self) -> list[str]:
+        """Возвращает полный список сохранённых рецептов в алфавитном порядке."""
+
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        cursor = await self._conn.execute(
+            """
+            SELECT name
+            FROM recipes
+            ORDER BY name COLLATE NOCASE
+            """
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+        names = [row["name"] for row in rows]
+        logger.debug("Получено %s рецептов для списка кораблей", len(names))
+        return names
+
     async def set_config_value(self, key: str, value: str) -> None:
         if self._conn is None:
             raise RuntimeError("Database connection is not initialised")
