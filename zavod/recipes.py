@@ -216,6 +216,7 @@ async def notify_recipe_added(
     output_quantity: Decimal,
     component_count: int,
     is_temporary: bool = False,
+    ship_type: Optional[str] = None,
 ) -> None:
     """Send a notification to the recipe feed channel about a new or updated recipe."""
 
@@ -241,6 +242,8 @@ async def notify_recipe_added(
         f"Выход за цикл: {output_quantity}",
         f"Количество компонентов: {component_count}",
     ]
+    if ship_type:
+        message_lines.append(f"Тип корабля: {ship_type}")
     if is_temporary:
         status_line = "Статус: временный. Подтвердите или удалите рецепт."
     else:

@@ -19,8 +19,14 @@ async def setup_hook() -> None:
     await database.connect()
     logger.info("Подключение к базе данных завершено")
     from .graph_requests import GraphRequestView
+    from .settings_console import (
+        SettingsConsoleView,
+        refresh_settings_console_message,
+    )
 
     bot.add_view(GraphRequestView())
+    bot.add_view(SettingsConsoleView())
+    await refresh_settings_console_message()
     await bot.tree.sync()
 
 

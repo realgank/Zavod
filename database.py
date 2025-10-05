@@ -70,9 +70,35 @@ async def _migration_2_add_recipe_status(conn: aiosqlite.Connection) -> None:
     )
 
 
+async def _migration_3_add_ship_type_support(conn: aiosqlite.Connection) -> None:
+    """Add support for ship types and their efficiencies."""
+
+    logger.info(
+        "Выполняю миграцию схемы #3: поддержка типов кораблей и их эффективности"
+    )
+    cursor = await conn.execute("PRAGMA table_info(recipes)")
+    columns = [row["name"] for row in await cursor.fetchall()]
+    await cursor.close()
+    if "ship_type" not in columns:
+        logger.info("Добавляю столбец ship_type в таблицу recipes")
+        await conn.execute("ALTER TABLE recipes ADD COLUMN ship_type TEXT")
+    else:
+        logger.info("Столбец ship_type уже существует, пропускаю добавление")
+
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ship_type_efficiencies (
+            type TEXT PRIMARY KEY,
+            efficiency REAL NOT NULL
+        )
+        """
+    )
+
+
 MIGRATIONS: dict[int, Migration] = {
     1: _migration_1_initialise_schema_version,
     2: _migration_2_add_recipe_status,
+    3: _migration_3_add_ship_type_support,
 }
 
 CURRENT_SCHEMA_VERSION = max(MIGRATIONS.keys(), default=0)
@@ -174,7 +200,8 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 output_quantity REAL NOT NULL DEFAULT 1,
-                is_temporary INTEGER NOT NULL DEFAULT 0
+                is_temporary INTEGER NOT NULL DEFAULT 0,
+                ship_type TEXT
             );
 
             CREATE TABLE IF NOT EXISTS recipe_components (
@@ -187,6 +214,11 @@ class Database:
             CREATE TABLE IF NOT EXISTS config (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS ship_type_efficiencies (
+                type TEXT PRIMARY KEY,
+                efficiency REAL NOT NULL
             );
             """
         )
@@ -267,6 +299,7 @@ class Database:
         components: Iterable[RecipeComponent],
         *,
         is_temporary: bool = False,
+        ship_type: Optional[str] = None,
     ) -> None:
         if self._conn is None:
             raise RuntimeError("Database connection is not initialised")
@@ -274,6 +307,7 @@ class Database:
         async with self._lock:
             logger.info("Сохраняю рецепт '%s'", name)
             temporary_flag = 1 if is_temporary else 0
+            normalised_ship_type = (ship_type or "").strip() or None
             cursor = await self._conn.execute(
                 "SELECT id FROM recipes WHERE name = ?",
                 (name,),
@@ -285,10 +319,15 @@ class Database:
                 logger.debug("Рецепт '%s' не найден, создаю новую запись", name)
                 cursor = await self._conn.execute(
                     """
-                    INSERT INTO recipes(name, output_quantity, is_temporary)
-                    VALUES(?, ?, ?)
+                    INSERT INTO recipes(name, output_quantity, is_temporary, ship_type)
+                    VALUES(?, ?, ?, ?)
                     """,
-                    (name, float(output_quantity), temporary_flag),
+                    (
+                        name,
+                        float(output_quantity),
+                        temporary_flag,
+                        normalised_ship_type,
+                    ),
                 )
                 recipe_id = cursor.lastrowid
                 await cursor.close()
@@ -300,10 +339,15 @@ class Database:
                 await self._conn.execute(
                     """
                     UPDATE recipes
-                    SET output_quantity = ?, is_temporary = ?
+                    SET output_quantity = ?, is_temporary = ?, ship_type = ?
                     WHERE id = ?
                     """,
-                    (float(output_quantity), temporary_flag, recipe_id),
+                    (
+                        float(output_quantity),
+                        temporary_flag,
+                        normalised_ship_type,
+                        recipe_id,
+                    ),
                 )
                 await self._conn.execute(
                     "DELETE FROM recipe_components WHERE recipe_id = ?",
@@ -418,6 +462,7 @@ class Database:
             "name": row["name"],
             "output_quantity": row["output_quantity"],
             "is_temporary": bool(row["is_temporary"]),
+            "ship_type": (row["ship_type"] or None),
             "components": components,
         }
         logger.debug(
@@ -544,6 +589,174 @@ class Database:
         logger.debug("Получено %s рецептов для списка кораблей", len(names))
         return names
 
+    async def get_known_ship_types(self) -> list[str]:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        types: set[str] = set()
+
+        cursor = await self._conn.execute(
+            "SELECT type FROM ship_type_efficiencies ORDER BY type COLLATE NOCASE"
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        for row in rows:
+            value = (row["type"] or "").strip()
+            if value:
+                types.add(value)
+
+        cursor = await self._conn.execute(
+            """
+            SELECT DISTINCT ship_type
+            FROM recipes
+            WHERE ship_type IS NOT NULL AND TRIM(ship_type) <> ''
+            """
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        for row in rows:
+            value = (row["ship_type"] or "").strip()
+            if value:
+                types.add(value)
+
+        result = sorted(types, key=lambda item: item.lower())
+        logger.debug("Найдены типы кораблей: %s", result)
+        return result
+
+    async def list_ship_type_efficiencies(self) -> dict[str, Decimal]:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        cursor = await self._conn.execute(
+            """
+            SELECT type, efficiency
+            FROM ship_type_efficiencies
+            ORDER BY type COLLATE NOCASE
+            """
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+        efficiencies: dict[str, Decimal] = {}
+        for row in rows:
+            raw_type = (row["type"] or "").strip()
+            if not raw_type:
+                continue
+            efficiencies[raw_type] = Decimal(str(row["efficiency"]))
+
+        logger.debug(
+            "Получено %s настроек эффективности типов кораблей", len(efficiencies)
+        )
+        return efficiencies
+
+    async def set_ship_type_efficiency(
+        self, ship_type: str, efficiency: Decimal
+    ) -> None:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        normalised_type = ship_type.strip()
+        if not normalised_type:
+            raise ValueError("Ship type must not be empty")
+
+        async with self._lock:
+            logger.info(
+                "Сохраняю эффективность %s для типа корабля '%s'",
+                efficiency,
+                normalised_type,
+            )
+            await self._conn.execute(
+                """
+                INSERT INTO ship_type_efficiencies(type, efficiency)
+                VALUES(?, ?)
+                ON CONFLICT(type) DO UPDATE SET efficiency = excluded.efficiency
+                """,
+                (normalised_type, float(efficiency)),
+            )
+            await self._conn.commit()
+
+    async def get_ship_type_efficiency(
+        self, ship_type: str
+    ) -> Optional[Decimal]:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        cursor = await self._conn.execute(
+            "SELECT efficiency FROM ship_type_efficiencies WHERE type = ?",
+            (ship_type.strip(),),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return Decimal(str(row["efficiency"]))
+
+    async def delete_ship_type_efficiency(self, ship_type: str) -> bool:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "DELETE FROM ship_type_efficiencies WHERE type = ?",
+                (ship_type.strip(),),
+            )
+            await self._conn.commit()
+            deleted = cursor.rowcount > 0
+            await cursor.close()
+            if deleted:
+                logger.info("Удалена эффективность для типа корабля '%s'", ship_type)
+            else:
+                logger.info(
+                    "Эффективность для типа корабля '%s' не найдена при удалении",
+                    ship_type,
+                )
+            return deleted
+
+    async def get_ship_type_statistics(self) -> list[dict[str, Any]]:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        cursor = await self._conn.execute(
+            """
+            SELECT ship_type, COUNT(*) AS recipe_count
+            FROM recipes
+            GROUP BY ship_type
+            ORDER BY ship_type IS NULL, ship_type COLLATE NOCASE
+            """
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+        stats = [
+            {
+                "ship_type": (row["ship_type"] or None),
+                "recipe_count": int(row["recipe_count"] or 0),
+            }
+            for row in rows
+        ]
+        logger.debug(
+            "Получена статистика по типам кораблей: %s", stats
+        )
+        return stats
+
+    async def get_recipes_without_type(self) -> list[str]:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        cursor = await self._conn.execute(
+            """
+            SELECT name
+            FROM recipes
+            WHERE ship_type IS NULL OR TRIM(ship_type) = ''
+            ORDER BY name COLLATE NOCASE
+            """
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        names = [row["name"] for row in rows]
+        logger.debug("Найдено %s рецептов без указания типа", len(names))
+        return names
+
     async def set_config_value(self, key: str, value: str) -> None:
         if self._conn is None:
             raise RuntimeError("Database connection is not initialised")
@@ -626,8 +839,20 @@ class Database:
         if base_recipe is None:
             raise RecipeNotFoundError(f"Recipe '{recipe_name}' is not defined")
 
+        efficiency_source = "custom"
         if efficiency is None:
-            efficiency = await self.get_global_efficiency()
+            ship_type = base_recipe.get("ship_type")
+            if ship_type:
+                type_efficiency = await self.get_ship_type_efficiency(ship_type)
+                if type_efficiency is not None:
+                    efficiency = type_efficiency
+                    efficiency_source = "ship_type"
+            if efficiency is None:
+                efficiency = await self.get_global_efficiency()
+                efficiency_source = "global"
+        else:
+            ship_type = base_recipe.get("ship_type")
+
         if efficiency <= 0:
             raise ValueError("Efficiency must be greater than 0")
 
@@ -729,6 +954,8 @@ class Database:
             "unit_cost": unit_cost,
             "output_quantity": output_quantity,
             "components": breakdown,
+            "ship_type": base_recipe.get("ship_type"),
+            "efficiency_source": efficiency_source,
         }
 
 

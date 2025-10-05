@@ -19,6 +19,10 @@ from .config import LAST_COMMAND_CHANNEL_CONFIG_KEY, RECIPE_FEED_CHANNEL_ID, STA
 from .core import bot, database
 from .notifications import send_restart_log
 from .recipes import notify_recipe_added, parse_recipe_table, read_attachment_content
+from .settings_console import (
+    refresh_settings_console_message,
+    set_settings_console_channel,
+)
 from .update import pull_latest_code, restart_service_if_configured
 from .graph_requests import (
     add_graph_request_role,
@@ -35,10 +39,31 @@ from .graph_requests import (
 logger = logging.getLogger(__name__)
 
 
+def _format_decimal(value: Decimal) -> str:
+    text = format(value.normalize(), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _match_ship_types(types: list[str], current: str) -> list[app_commands.Choice[str]]:
+    search = current.strip().lower()
+    if not search:
+        filtered = types[:25]
+    else:
+        filtered = [
+            value
+            for value in types
+            if search in value.lower()
+        ][:25]
+    return [app_commands.Choice(name=value, value=value) for value in filtered]
+
+
 @bot.tree.command(name="add_recipe", description="Добавить или обновить рецепт")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
     recipe_name="Название рецепта",
+    ship_type="Тип корабля",
     output_quantity="Количество результата на цикл",
     table="Текстовая таблица с компонентами",
     file="Текстовый файл с таблицей рецепта",
@@ -46,6 +71,7 @@ logger = logging.getLogger(__name__)
 async def add_recipe_command(
     interaction: discord.Interaction,
     recipe_name: str,
+    ship_type: str,
     output_quantity: Optional[int] = 1,
     table: Optional[str] = None,
     file: Optional[discord.Attachment] = None,
@@ -57,12 +83,20 @@ async def add_recipe_command(
         interaction.user,
         recipe_name,
         output_quantity,
+        ship_type,
     )
     if output_quantity is None:
         output_quantity = 1
     if output_quantity <= 0:
         await interaction.response.send_message(
             "Количество результата должно быть положительным", ephemeral=False
+        )
+        return
+
+    normalised_ship_type = ship_type.strip()
+    if not normalised_ship_type:
+        await interaction.response.send_message(
+            "Укажите тип корабля для рецепта.", ephemeral=False
         )
         return
 
@@ -86,6 +120,7 @@ async def add_recipe_command(
             output_quantity=Decimal(output_quantity),
             components=components,
             is_temporary=True,
+            ship_type=normalised_ship_type,
         )
     except ValueError as exc:
         await interaction.followup.send(
@@ -118,7 +153,17 @@ async def add_recipe_command(
         output_quantity=Decimal(output_quantity),
         component_count=len(components),
         is_temporary=True,
+        ship_type=normalised_ship_type,
     )
+
+
+@add_recipe_command.autocomplete("ship_type")
+async def add_recipe_ship_type_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    del interaction
+    types = await database.get_known_ship_types()
+    return _match_ship_types(types, current)
 
 
 @bot.tree.command(name="price", description="Рассчитать стоимость рецепта")
@@ -173,6 +218,8 @@ async def recipe_price_command(
     unit_cost = result["unit_cost"]
     output_quantity = result["output_quantity"]
     components = result["components"]
+    ship_type = result.get("ship_type")
+    efficiency_source = result.get("efficiency_source", "custom")
 
     resource_lines = ["Ресурсы:"]
     if components:
@@ -193,11 +240,23 @@ async def recipe_price_command(
         effective_efficiency,
         run_cost,
     )
+    if efficiency_source == "ship_type" and ship_type:
+        efficiency_line = (
+            f"Эффективность типа '{ship_type}': {effective_efficiency}%"
+        )
+    elif efficiency_source == "global":
+        efficiency_line = f"Эффективность (глобальная): {effective_efficiency}%"
+    else:
+        efficiency_line = f"Эффективность: {effective_efficiency}%"
+
+    type_line = f"Тип корабля: {ship_type}" if ship_type else "Тип корабля: не указан"
+
     await interaction.response.send_message(
         "\n".join(
             [
                 f"Расчёт для '{recipe_name}'",
-                f"Эффективность: {effective_efficiency}%",
+                efficiency_line,
+                type_line,
                 f"Количество на цикл: {output_quantity}",
                 f"Стоимость единицы: {unit_cost:,.2f}",
                 *resource_lines,
@@ -286,6 +345,102 @@ async def set_efficiency_command(interaction: discord.Interaction, value: float)
     )
 
 
+@bot.tree.command(
+    name="set_ship_type_efficiency",
+    description="Установить эффективность для типа корабля",
+)
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    ship_type="Название типа корабля",
+    value="Эффективность в процентах",
+)
+async def set_ship_type_efficiency_command(
+    interaction: discord.Interaction, ship_type: str, value: float
+) -> None:
+    logger.info(
+        "Получена команда set_ship_type_efficiency: пользователь=%s, тип=%s, значение=%s",
+        interaction.user,
+        ship_type,
+        value,
+    )
+    normalised_type = ship_type.strip()
+    if not normalised_type:
+        await interaction.response.send_message(
+            "Укажите название типа корабля.", ephemeral=False
+        )
+        return
+    try:
+        efficiency = parse_decimal(str(value))
+    except ValueError:
+        await interaction.response.send_message(
+            "Эффективность должна быть числом", ephemeral=False
+        )
+        return
+    if efficiency <= 0:
+        await interaction.response.send_message(
+            "Эффективность должна быть положительной", ephemeral=False
+        )
+        return
+
+    await database.set_ship_type_efficiency(normalised_type, efficiency)
+    await refresh_settings_console_message()
+    await interaction.response.send_message(
+        "Эффективность для типа '{type}' установлена на {value}%".format(
+            type=normalised_type,
+            value=_format_decimal(efficiency),
+        ),
+        ephemeral=False,
+    )
+
+
+@set_ship_type_efficiency_command.autocomplete("ship_type")
+async def set_ship_type_efficiency_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    del interaction
+    types = await database.get_known_ship_types()
+    return _match_ship_types(types, current)
+
+
+@bot.tree.command(
+    name="delete_ship_type_efficiency",
+    description="Удалить настройку эффективности типа корабля",
+)
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(ship_type="Название типа корабля")
+async def delete_ship_type_efficiency_command(
+    interaction: discord.Interaction, ship_type: str
+) -> None:
+    logger.info(
+        "Получена команда delete_ship_type_efficiency: пользователь=%s, тип=%s",
+        interaction.user,
+        ship_type,
+    )
+    normalised_type = ship_type.strip()
+    if not normalised_type:
+        await interaction.response.send_message(
+            "Укажите название типа корабля.", ephemeral=False
+        )
+        return
+
+    removed = await database.delete_ship_type_efficiency(normalised_type)
+    await refresh_settings_console_message()
+    if removed:
+        message = f"Настройка эффективности для типа '{normalised_type}' удалена."
+    else:
+        message = f"Тип '{normalised_type}' не найден в настройках эффективности."
+    await interaction.response.send_message(message, ephemeral=False)
+
+
+@delete_ship_type_efficiency_command.autocomplete("ship_type")
+async def delete_ship_type_efficiency_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    del interaction
+    types = await database.get_known_ship_types()
+    return _match_ship_types(types, current)
+
+
 @bot.tree.command(name="global_efficiency", description="Показать глобальную эффективность")
 async def global_efficiency_command(interaction: discord.Interaction) -> None:
     """Показывает текущую глобальную эффективность."""
@@ -298,6 +453,140 @@ async def global_efficiency_command(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(
         f"Текущая глобальная эффективность: {value}%", ephemeral=False
     )
+
+
+@bot.tree.command(
+    name="ship_type_efficiencies",
+    description="Показать эффективности по типам кораблей",
+)
+async def ship_type_efficiencies_command(
+    interaction: discord.Interaction,
+) -> None:
+    logger.info(
+        "Получена команда ship_type_efficiencies: пользователь=%s",
+        interaction.user,
+    )
+    global_efficiency = await database.get_global_efficiency()
+    type_efficiencies = await database.list_ship_type_efficiencies()
+    stats = await database.get_ship_type_statistics()
+
+    lines = [
+        "Глобальная эффективность: {value}%".format(
+            value=_format_decimal(global_efficiency)
+        )
+    ]
+    if not stats and not type_efficiencies:
+        lines.append("Типы кораблей не настроены.")
+    else:
+        lines.append("Настройки по типам:")
+        handled = set()
+        for entry in stats:
+            ship_type = entry["ship_type"]
+            recipe_count = entry["recipe_count"]
+            if ship_type is None:
+                lines.append(
+                    f"• Не указан: рецептов {recipe_count}"
+                )
+                continue
+            handled.add(ship_type)
+            efficiency = type_efficiencies.get(ship_type)
+            if efficiency is None:
+                lines.append(
+                    f"• {ship_type}: эффективность не задана (рецептов {recipe_count})"
+                )
+            else:
+                lines.append(
+                    "• {type}: {value}% (рецептов {count})".format(
+                        type=ship_type,
+                        value=_format_decimal(efficiency),
+                        count=recipe_count,
+                    )
+                )
+        for ship_type, efficiency in type_efficiencies.items():
+            if ship_type in handled:
+                continue
+            lines.append(
+                "• {type}: {value}% (рецептов 0)".format(
+                    type=ship_type,
+                    value=_format_decimal(efficiency),
+                )
+            )
+
+    await interaction.response.send_message("\n".join(lines), ephemeral=False)
+
+
+@bot.tree.command(
+    name="set_settings_console_channel",
+    description="Назначить канал консоли настройки эффективности",
+)
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(channel="Текстовый канал для размещения консоли")
+async def set_settings_console_channel_command(
+    interaction: discord.Interaction, channel: discord.TextChannel
+) -> None:
+    logger.info(
+        "Получена команда set_settings_console_channel: пользователь=%s, канал=%s",
+        interaction.user,
+        channel,
+    )
+    success = await set_settings_console_channel(channel)
+    if success:
+        message = (
+            f"Консоль настройки эффективности размещена в канале {channel.mention}."
+        )
+    else:
+        message = (
+            "Не удалось опубликовать консоль настройки. Проверьте права доступа."
+        )
+    await interaction.response.send_message(message, ephemeral=False)
+
+
+@bot.tree.command(
+    name="refresh_settings_console",
+    description="Обновить консоль настройки эффективности",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def refresh_settings_console_command(
+    interaction: discord.Interaction,
+) -> None:
+    logger.info(
+        "Получена команда refresh_settings_console: пользователь=%s",
+        interaction.user,
+    )
+    success = await refresh_settings_console_message()
+    if success:
+        message = "Консоль настроек обновлена."
+    else:
+        message = "Не удалось обновить консоль. Проверьте, настроен ли канал."
+    await interaction.response.send_message(message, ephemeral=True)
+
+
+@bot.tree.command(
+    name="audit_recipe_types",
+    description="Показать рецепты без указанного типа",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def audit_recipe_types_command(
+    interaction: discord.Interaction,
+) -> None:
+    logger.info(
+        "Получена команда audit_recipe_types: пользователь=%s",
+        interaction.user,
+    )
+    recipes_without_type = await database.get_recipes_without_type()
+    if not recipes_without_type:
+        message = "Все рецепты имеют указанный тип."
+    else:
+        preview_limit = 20
+        preview = recipes_without_type[:preview_limit]
+        lines = ["Рецепты без типа:"]
+        lines.extend(f"• {name}" for name in preview)
+        if len(recipes_without_type) > preview_limit:
+            lines.append(
+                f"…и ещё {len(recipes_without_type) - preview_limit} рецептов без типа."
+            )
+        message = "\n".join(lines)
+    await interaction.response.send_message(message, ephemeral=True)
 
 
 @bot.tree.command(name="update_bot", description="Обновить код бота из GitHub")
