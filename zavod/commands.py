@@ -20,6 +20,17 @@ from .core import bot, database
 from .notifications import send_restart_log
 from .recipes import notify_recipe_added, parse_recipe_table, read_attachment_content
 from .update import pull_latest_code, restart_service_if_configured
+from .graph_requests import (
+    add_graph_request_role,
+    clear_graph_request_message_reference,
+    clear_graph_request_roles,
+    get_graph_request_channel_id,
+    get_graph_request_message_id,
+    get_graph_request_role_ids,
+    remove_graph_request_role,
+    send_graph_request_message,
+    set_graph_request_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -355,3 +366,183 @@ async def update_bot_command(interaction: discord.Interaction) -> None:
     if restart_message:
         response_lines.extend(["", restart_message])
     await interaction.followup.send("\n".join(response_lines), ephemeral=False)
+
+
+graph_group = app_commands.Group(
+    name="graph",
+    description="Настройки системы заявок на граф",
+)
+
+
+@graph_group.command(name="set_channel", description="Указать канал для заявок на граф")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(channel="Канал, где будет размещена кнопка создания заявки")
+async def graph_set_channel_command(
+    interaction: discord.Interaction, channel: discord.TextChannel
+) -> None:
+    logger.info(
+        "Получена команда graph set_channel: пользователь=%s, канал=%s",
+        interaction.user,
+        channel,
+    )
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Команда доступна только на сервере.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    previous_message_id = await get_graph_request_message_id()
+    previous_channel_id = await get_graph_request_channel_id()
+    cleanup_note: Optional[str] = None
+    if previous_channel_id is not None and previous_message_id is not None:
+        try:
+            old_channel = interaction.guild.get_channel(previous_channel_id)
+            if old_channel is None:
+                old_channel = await interaction.client.fetch_channel(previous_channel_id)
+            if isinstance(old_channel, (discord.TextChannel, discord.Thread)):
+                old_message = await old_channel.fetch_message(previous_message_id)
+                await old_message.delete()
+                logger.info(
+                    "Удалено предыдущее сообщение заявок на граф: канал=%s, сообщение=%s",
+                    previous_channel_id,
+                    previous_message_id,
+                )
+        except discord.NotFound:
+            logger.info(
+                "Предыдущее сообщение заявок на граф не найдено при удалении"
+            )
+        except discord.HTTPException as exc:
+            cleanup_note = "Не удалось удалить предыдущее сообщение."
+            logger.warning(
+                "Ошибка удаления предыдущего сообщения заявок на граф %s/%s: %s",
+                previous_channel_id,
+                previous_message_id,
+                exc,
+            )
+
+    await clear_graph_request_message_reference()
+
+    try:
+        message = await send_graph_request_message(channel)
+    except discord.HTTPException as exc:
+        logger.exception("Не удалось отправить сообщение с заявками на граф: %s", exc)
+        await interaction.followup.send(
+            "Не удалось отправить сообщение с кнопкой в выбранный канал. Проверьте права доступа и попробуйте снова.",
+            ephemeral=True,
+        )
+        return
+
+    await set_graph_request_message(channel.id, message.id)
+    response_lines = [
+        f"Сообщение с кнопкой размещено в {channel.mention}.",
+        f"ID сообщения: {message.id}",
+    ]
+    if cleanup_note:
+        response_lines.append(cleanup_note)
+    await interaction.followup.send("\n".join(response_lines), ephemeral=True)
+
+
+@graph_group.command(name="add_role", description="Добавить роль для уведомлений о заявках")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(role="Роль, которая должна получать уведомления")
+async def graph_add_role_command(
+    interaction: discord.Interaction, role: discord.Role
+) -> None:
+    logger.info(
+        "Получена команда graph add_role: пользователь=%s, роль=%s",
+        interaction.user,
+        role,
+    )
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Команда доступна только на сервере.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    added = await add_graph_request_role(role.id)
+    if added:
+        message = f"Роль {role.mention} добавлена в список уведомлений."
+    else:
+        message = f"Роль {role.mention} уже находится в списке уведомлений."
+    await interaction.followup.send(message, ephemeral=True)
+
+
+@graph_group.command(name="remove_role", description="Удалить роль из уведомлений")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(role="Роль, которую необходимо удалить")
+async def graph_remove_role_command(
+    interaction: discord.Interaction, role: discord.Role
+) -> None:
+    logger.info(
+        "Получена команда graph remove_role: пользователь=%s, роль=%s",
+        interaction.user,
+        role,
+    )
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Команда доступна только на сервере.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    removed = await remove_graph_request_role(role.id)
+    if removed:
+        message = f"Роль {role.mention} удалена из списка уведомлений."
+    else:
+        message = f"Роль {role.mention} не найдена в списке уведомлений."
+    await interaction.followup.send(message, ephemeral=True)
+
+
+@graph_group.command(name="clear_roles", description="Очистить список ролей уведомлений")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def graph_clear_roles_command(interaction: discord.Interaction) -> None:
+    logger.info(
+        "Получена команда graph clear_roles: пользователь=%s", interaction.user
+    )
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Команда доступна только на сервере.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    await clear_graph_request_roles()
+    await interaction.followup.send(
+        "Список ролей для уведомлений очищен.", ephemeral=True
+    )
+
+
+@graph_group.command(name="list_roles", description="Показать роли уведомлений")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def graph_list_roles_command(interaction: discord.Interaction) -> None:
+    logger.info(
+        "Получена команда graph list_roles: пользователь=%s", interaction.user
+    )
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Команда доступна только на сервере.", ephemeral=True
+        )
+        return
+
+    role_ids = await get_graph_request_role_ids()
+    if not role_ids:
+        await interaction.response.send_message(
+            "Список ролей уведомлений пуст.", ephemeral=True
+        )
+        return
+
+    lines = ["Текущие роли уведомлений:"]
+    for role_id in role_ids:
+        role = interaction.guild.get_role(role_id)
+        if role is not None:
+            lines.append(f"• {role.mention} (ID: {role.id})")
+        else:
+            lines.append(f"• ID {role_id} — роль не найдена")
+
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+bot.tree.add_command(graph_group)
