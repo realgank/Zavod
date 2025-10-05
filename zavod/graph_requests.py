@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from decimal import Decimal
 from typing import Iterable, Optional
 
@@ -30,7 +31,7 @@ def _decode_role_ids(raw: Optional[str]) -> list[int]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         logger.warning(
-            "Не удалось разобрать список ролей для заявок на граф из значения: %s", raw
+            "Не удалось разобрать список ролей для заявок на крафт из значения: %s", raw
         )
         return []
     result: list[int] = []
@@ -55,7 +56,7 @@ async def get_graph_request_channel_id() -> Optional[int]:
         return int(raw_value)
     except ValueError:
         logger.warning(
-            "Сохранённый идентификатор канала заявок на граф некорректен: %s", raw_value
+            "Сохранённый идентификатор канала заявок на крафт некорректен: %s", raw_value
         )
         return None
 
@@ -74,7 +75,7 @@ async def get_graph_request_message_id() -> Optional[int]:
         return int(raw_value)
     except ValueError:
         logger.warning(
-            "Сохранённый идентификатор сообщения для заявок на граф некорректен: %s",
+            "Сохранённый идентификатор сообщения для заявок на крафт некорректен: %s",
             raw_value,
         )
         return None
@@ -116,7 +117,7 @@ async def get_graph_ship_names() -> list[str]:
         decoded = json.loads(raw_value)
     except json.JSONDecodeError:
         logger.warning(
-            "Не удалось разобрать список кораблей графика из значения: %s", raw_value
+            "Не удалось разобрать список кораблей крафта из значения: %s", raw_value
         )
         return []
 
@@ -188,7 +189,7 @@ def _format_currency(value: Decimal) -> str:
 
 async def send_graph_request_message(channel: discord.TextChannel) -> discord.Message:
     content = (
-        "В этом канале принимаются заявки на граф.\n"
+        "В этом канале принимаются заявки на крафт.\n"
         "Нажмите кнопку ниже, чтобы создать отдельную тему с вашей заявкой."
     )
     view = GraphRequestView()
@@ -205,7 +206,7 @@ async def _get_request_channel(
             fetched = await guild.fetch_channel(channel_id)
         except discord.HTTPException as exc:
             logger.warning(
-                "Не удалось получить канал %s для создания заявки на граф: %s",
+                "Не удалось получить канал %s для создания заявки на крафт: %s",
                 channel_id,
                 exc,
             )
@@ -215,7 +216,7 @@ async def _get_request_channel(
     if isinstance(channel, discord.TextChannel):
         return channel
     logger.warning(
-        "Канал %s имеет неподдерживаемый тип %s для заявок на граф",
+        "Канал %s имеет неподдерживаемый тип %s для заявок на крафт",
         channel_id,
         type(channel).__name__,
     )
@@ -227,7 +228,7 @@ async def _create_request_thread(
     requester: discord.Member,
     recipe_name: str,
 ) -> discord.Thread:
-    base_name = f"Граф • {recipe_name}"
+    base_name = f"Крафт • {recipe_name}"
     if requester.display_name:
         base_name += f" • {requester.display_name}"
     thread_name = base_name[:100]
@@ -237,18 +238,18 @@ async def _create_request_thread(
             type=discord.ChannelType.private_thread,
             invitable=False,
             auto_archive_duration=10080,
-            reason=f"Заявка на граф от {requester}"
+            reason=f"Заявка на крафт от {requester}"
         )
     except discord.HTTPException as exc:
         logger.warning(
-            "Не удалось создать приватную тему для заявки на граф, пробую открытую: %s",
+            "Не удалось создать приватную тему для заявки на крафт, пробую открытую: %s",
             exc,
         )
         thread = await channel.create_thread(
             name=thread_name,
             type=discord.ChannelType.public_thread,
             auto_archive_duration=10080,
-            reason=f"Заявка на граф от {requester}"
+            reason=f"Заявка на крафт от {requester}"
         )
     return thread
 
@@ -310,7 +311,7 @@ async def _format_component_lines(recipe: dict[str, object]) -> list[str]:
 
 class GraphRequestModal(discord.ui.Modal):
     def __init__(self, *, channel_id: int, ship_name: str) -> None:
-        super().__init__(title="Новая заявка на граф")
+        super().__init__(title="Новая заявка на крафт")
         self._channel_id = channel_id
         self._ship_name = ship_name
         self.comment_input = discord.ui.TextInput(
@@ -349,7 +350,7 @@ class GraphRequestModal(discord.ui.Modal):
                 channel, interaction.user, recipe.get("name", ship_name)
             )
         except discord.HTTPException as exc:
-            logger.exception("Не удалось создать тему для заявки на граф: %s", exc)
+            logger.exception("Не удалось создать тему для заявки на крафт: %s", exc)
             await interaction.response.send_message(
                 "Не удалось создать тему для заявки. Попробуйте позже или обратитесь к администрации.",
                 ephemeral=True,
@@ -366,7 +367,7 @@ class GraphRequestModal(discord.ui.Modal):
             cost_result = await database.calculate_recipe_cost(ship_name)
         except ResourcePriceNotFoundError as exc:
             logger.info(
-                "Не удалось рассчитать стоимость для '%s' в заявке на граф: %s",
+                "Не удалось рассчитать стоимость для '%s' в заявке на крафт: %s",
                 ship_name,
                 exc,
             )
@@ -448,13 +449,14 @@ class GraphRequestView(discord.ui.View):
         ship_names = await get_graph_ship_names()
         if not ship_names:
             await interaction.response.send_message(
-                "График кораблей не настроен. Обратитесь к администрации.",
+                "Список кораблей для крафта не настроен. Обратитесь к администрации.",
                 ephemeral=True,
             )
             return
         view = GraphShipSelectionView(channel_id=channel_id, ship_names=ship_names)
         await interaction.response.send_message(
-            "Выберите корабль из графика:", view=view, ephemeral=True
+            "Выберите корабль для крафта:", view=view, ephemeral=True
+
         )
 
 
@@ -476,7 +478,26 @@ class GraphShipSelect(discord.ui.Select):
             max_values=1,
             options=options,
         )
-        self._channel_id = channel_id
+
+    def _build_options(self) -> list[discord.SelectOption]:
+        start = self._page * 25
+        end = start + 25
+        options: list[discord.SelectOption] = []
+        for name in self._ship_names[start:end]:
+            label = name[:100] or name
+            options.append(discord.SelectOption(label=label, value=name))
+        return options
+
+    def _build_placeholder(self) -> str:
+        if self._total_pages > 1:
+            return f"Выберите корабль для крафта (стр. {self._page + 1}/{self._total_pages})"
+        return "Выберите корабль для крафта"
+
+    def update_page(self, page: int) -> None:
+        self._page = page
+        self.options = self._build_options()
+        self.placeholder = self._build_placeholder()
+        self.values = []
 
     async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
         ship_name = self.values[0]
@@ -490,7 +511,57 @@ class GraphShipSelect(discord.ui.Select):
 class GraphShipSelectionView(discord.ui.View):
     def __init__(self, *, channel_id: int, ship_names: list[str]) -> None:
         super().__init__(timeout=300)
-        self.add_item(GraphShipSelect(channel_id=channel_id, ship_names=ship_names))
+        self._page = 0
+        self._total_pages = max(1, math.ceil(len(ship_names) / 25))
+        self._select = GraphShipSelect(
+            channel_id=channel_id,
+            ship_names=ship_names,
+            page=self._page,
+        )
+        self.add_item(self._select)
+        if self._total_pages > 1:
+            self._prev_button = GraphShipPageButton(direction=-1)
+            self._next_button = GraphShipPageButton(direction=1)
+            self.add_item(self._prev_button)
+            self.add_item(self._next_button)
+            self._update_controls()
+
+    @property
+    def total_pages(self) -> int:
+        return self._total_pages
+
+    @property
+    def page(self) -> int:
+        return self._page
+
+    def change_page(self, delta: int) -> None:
+        new_page = min(max(self._page + delta, 0), self._total_pages - 1)
+        if new_page == self._page:
+            return
+        self._page = new_page
+        self._select.update_page(new_page)
+        self._update_controls()
+
+    def _update_controls(self) -> None:
+        if self._total_pages <= 1:
+            return
+        self._prev_button.disabled = self._page == 0
+        self._next_button.disabled = self._page >= self._total_pages - 1
+
+
+class GraphShipPageButton(discord.ui.Button):
+    def __init__(self, *, direction: int) -> None:
+        label = "Предыдущие" if direction < 0 else "Следующие"
+        super().__init__(style=discord.ButtonStyle.secondary, label=label, row=1)
+        self._direction = -1 if direction < 0 else 1
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        view = self.view
+        if not isinstance(view, GraphShipSelectionView):
+            await interaction.response.defer()
+            return
+        view.change_page(self._direction)
+        await interaction.response.edit_message(view=view)
 
 
 __all__ = [
