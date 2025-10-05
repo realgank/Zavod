@@ -8,12 +8,14 @@ from typing import Iterable, Optional
 import discord
 
 from .core import database
+from database import CircularRecipeReferenceError, ResourcePriceNotFoundError
 
 logger = logging.getLogger(__name__)
 
 GRAPH_REQUEST_CHANNEL_CONFIG_KEY = "graph_request_channel_id"
 GRAPH_REQUEST_MESSAGE_CONFIG_KEY = "graph_request_message_id"
 GRAPH_REQUEST_ROLE_CONFIG_KEY = "graph_request_role_ids"
+GRAPH_REQUEST_SHIP_SCHEDULE_CONFIG_KEY = "graph_request_ship_schedule"
 
 
 def _encode_role_ids(role_ids: Iterable[int]) -> str:
@@ -99,6 +101,55 @@ async def set_graph_request_role_ids(role_ids: Iterable[int]) -> None:
     await database.set_config_value(GRAPH_REQUEST_ROLE_CONFIG_KEY, encoded)
 
 
+def _normalise_ship_name(name: object) -> Optional[str]:
+    if not isinstance(name, str):
+        return None
+    stripped = name.strip()
+    return stripped or None
+
+
+async def get_graph_ship_names() -> list[str]:
+    raw_value = await database.get_config_value(GRAPH_REQUEST_SHIP_SCHEDULE_CONFIG_KEY)
+    if not raw_value:
+        return []
+    try:
+        decoded = json.loads(raw_value)
+    except json.JSONDecodeError:
+        logger.warning(
+            "Не удалось разобрать список кораблей графика из значения: %s", raw_value
+        )
+        return []
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for item in decoded:
+        name = _normalise_ship_name(item)
+        if not name:
+            continue
+        if name in seen:
+            continue
+        unique.append(name)
+        seen.add(name)
+    return unique
+
+
+async def set_graph_ship_names(names: Iterable[str]) -> None:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in names:
+        name = _normalise_ship_name(value)
+        if not name:
+            continue
+        if name in seen:
+            continue
+        unique.append(name)
+        seen.add(name)
+    await database.set_config_value(
+        GRAPH_REQUEST_SHIP_SCHEDULE_CONFIG_KEY,
+        json.dumps(unique, ensure_ascii=False),
+    )
+
+
 async def add_graph_request_role(role_id: int) -> bool:
     role_ids = await get_graph_request_role_ids()
     if role_id in role_ids:
@@ -126,6 +177,12 @@ def _format_quantity(value: Decimal) -> str:
         formatted = f"{int(value):,}"
     else:
         formatted = f"{value.normalize():f}"
+    return formatted.replace(",", " ")
+
+
+def _format_currency(value: Decimal) -> str:
+    quantised = value.quantize(Decimal("0.01"))
+    formatted = f"{quantised:,.2f}"
     return formatted.replace(",", " ")
 
 
@@ -252,16 +309,13 @@ async def _format_component_lines(recipe: dict[str, object]) -> list[str]:
 
 
 class GraphRequestModal(discord.ui.Modal):
-    def __init__(self, *, channel_id: int) -> None:
+    def __init__(self, *, channel_id: int, ship_name: str) -> None:
         super().__init__(title="Новая заявка на граф")
         self._channel_id = channel_id
-        self.ship_name_input = discord.ui.TextInput(
-            label="Корабль", placeholder="Введите точное название рецепта", max_length=100
-        )
+        self._ship_name = ship_name
         self.comment_input = discord.ui.TextInput(
             label="Комментарий", required=False, style=discord.TextStyle.paragraph, max_length=500
         )
-        self.add_item(self.ship_name_input)
         self.add_item(self.comment_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
@@ -272,29 +326,12 @@ class GraphRequestModal(discord.ui.Modal):
             )
             return
 
-        ship_name = self.ship_name_input.value.strip()
-        if not ship_name:
-            await interaction.response.send_message(
-                "Укажите название корабля, который требуется построить.",
-                ephemeral=True,
-            )
-            return
+        ship_name = self._ship_name
 
         recipe = await database.get_recipe(ship_name)
         if recipe is None:
-            suggestions = await database.search_recipe_names(ship_name, limit=5)
-            suggestion_text = (
-                "\n".join(f"• {name}" for name in suggestions) if suggestions else ""
-            )
-            message_lines = [
-                f"Рецепт '{ship_name}' не найден.",
-            ]
-            if suggestion_text:
-                message_lines.extend(
-                    ["Возможно, вы имели в виду:", suggestion_text]
-                )
             await interaction.response.send_message(
-                "\n".join(message_lines),
+                "Рецепт для выбранного корабля не найден. Обратитесь к администрации.",
                 ephemeral=True,
             )
             return
@@ -324,6 +361,27 @@ class GraphRequestModal(discord.ui.Modal):
         await _prepare_thread(thread, interaction.user, roles)
 
         comment = self.comment_input.value.strip()
+        cost_result = None
+        try:
+            cost_result = await database.calculate_recipe_cost(ship_name)
+        except ResourcePriceNotFoundError as exc:
+            logger.info(
+                "Не удалось рассчитать стоимость для '%s' в заявке на граф: %s",
+                ship_name,
+                exc,
+            )
+        except CircularRecipeReferenceError as exc:
+            logger.warning(
+                "Обнаружена циклическая ссылка при расчёте стоимости '%s': %s",
+                ship_name,
+                exc,
+            )
+        except ValueError as exc:
+            logger.warning(
+                "Некорректные данные рецепта '%s' при расчёте стоимости: %s",
+                ship_name,
+                exc,
+            )
         lines = [
             f"{interaction.user.mention} хочет построить **{recipe.get('name', ship_name)}**.",
         ]
@@ -333,6 +391,14 @@ class GraphRequestModal(discord.ui.Modal):
         lines.append("")
         lines.append("Требуемые ресурсы:")
         lines.extend(await _format_component_lines(recipe))
+        if cost_result is not None:
+            lines.append("")
+            lines.append(
+                "Итоговая стоимость: {run} ISK за цикл (≈ {unit} ISK за единицу).".format(
+                    run=_format_currency(cost_result["run_cost"]),
+                    unit=_format_currency(cost_result["unit_cost"]),
+                )
+            )
 
         if roles:
             role_mentions = " ".join(role.mention for role in roles)
@@ -379,15 +445,59 @@ class GraphRequestView(discord.ui.View):
                 ephemeral=True,
             )
             return
-        await interaction.response.send_modal(
-            GraphRequestModal(channel_id=channel_id)
+        ship_names = await get_graph_ship_names()
+        if not ship_names:
+            await interaction.response.send_message(
+                "График кораблей не настроен. Обратитесь к администрации.",
+                ephemeral=True,
+            )
+            return
+        view = GraphShipSelectionView(channel_id=channel_id, ship_names=ship_names)
+        await interaction.response.send_message(
+            "Выберите корабль из графика:", view=view, ephemeral=True
         )
+
+
+class GraphShipSelect(discord.ui.Select):
+    def __init__(self, *, channel_id: int, ship_names: list[str]) -> None:
+        options: list[discord.SelectOption] = []
+        limited_names = ship_names[:25]
+        if len(ship_names) > 25:
+            logger.warning(
+                "Список кораблей графика содержит %s элементов, отображаются только первые 25",
+                len(ship_names),
+            )
+        for name in limited_names:
+            label = name[:100] or name
+            options.append(discord.SelectOption(label=label, value=name))
+        super().__init__(
+            placeholder="Выберите корабль из графика",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self._channel_id = channel_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        ship_name = self.values[0]
+        await interaction.response.send_modal(
+            GraphRequestModal(channel_id=self._channel_id, ship_name=ship_name)
+        )
+        if self.view is not None:
+            self.view.stop()
+
+
+class GraphShipSelectionView(discord.ui.View):
+    def __init__(self, *, channel_id: int, ship_names: list[str]) -> None:
+        super().__init__(timeout=300)
+        self.add_item(GraphShipSelect(channel_id=channel_id, ship_names=ship_names))
 
 
 __all__ = [
     "GRAPH_REQUEST_CHANNEL_CONFIG_KEY",
     "GRAPH_REQUEST_MESSAGE_CONFIG_KEY",
     "GRAPH_REQUEST_ROLE_CONFIG_KEY",
+    "GRAPH_REQUEST_SHIP_SCHEDULE_CONFIG_KEY",
     "GraphRequestModal",
     "GraphRequestView",
     "add_graph_request_role",
@@ -396,9 +506,11 @@ __all__ = [
     "get_graph_request_channel_id",
     "get_graph_request_message_id",
     "get_graph_request_role_ids",
+    "get_graph_ship_names",
     "remove_graph_request_role",
     "send_graph_request_message",
     "set_graph_request_channel_id",
     "set_graph_request_message",
     "set_graph_request_role_ids",
+    "set_graph_ship_names",
 ]
