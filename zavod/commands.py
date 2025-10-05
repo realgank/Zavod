@@ -370,11 +370,11 @@ async def update_bot_command(interaction: discord.Interaction) -> None:
 
 graph_group = app_commands.Group(
     name="graph",
-    description="Настройки системы заявок на граф",
+    description="Настройки системы заявок на крафт",
 )
 
 
-@graph_group.command(name="set_channel", description="Указать канал для заявок на граф")
+@graph_group.command(name="set_channel", description="Указать канал для заявок на крафт")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(channel="Канал, где будет размещена кнопка создания заявки")
 async def graph_set_channel_command(
@@ -405,18 +405,18 @@ async def graph_set_channel_command(
                 old_message = await old_channel.fetch_message(previous_message_id)
                 await old_message.delete()
                 logger.info(
-                    "Удалено предыдущее сообщение заявок на граф: канал=%s, сообщение=%s",
+                    "Удалено предыдущее сообщение заявок на крафт: канал=%s, сообщение=%s",
                     previous_channel_id,
                     previous_message_id,
                 )
         except discord.NotFound:
             logger.info(
-                "Предыдущее сообщение заявок на граф не найдено при удалении"
+                "Предыдущее сообщение заявок на крафт не найдено при удалении"
             )
         except discord.HTTPException as exc:
             cleanup_note = "Не удалось удалить предыдущее сообщение."
             logger.warning(
-                "Ошибка удаления предыдущего сообщения заявок на граф %s/%s: %s",
+                "Ошибка удаления предыдущего сообщения заявок на крафт %s/%s: %s",
                 previous_channel_id,
                 previous_message_id,
                 exc,
@@ -427,7 +427,7 @@ async def graph_set_channel_command(
     try:
         message = await send_graph_request_message(channel)
     except discord.HTTPException as exc:
-        logger.exception("Не удалось отправить сообщение с заявками на граф: %s", exc)
+        logger.exception("Не удалось отправить сообщение с заявками на крафт: %s", exc)
         await interaction.followup.send(
             "Не удалось отправить сообщение с кнопкой в выбранный канал. Проверьте права доступа и попробуйте снова.",
             ephemeral=True,
