@@ -13,6 +13,8 @@ logging.basicConfig(
 )
 
 intents = discord.Intents.default()
+if hasattr(intents, "members"):
+    intents.members = True
 bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
 
 database = Database()

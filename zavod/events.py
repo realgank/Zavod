@@ -18,6 +18,9 @@ async def setup_hook() -> None:
     logger.info("Запуск setup_hook: подключаюсь к базе данных")
     await database.connect()
     logger.info("Подключение к базе данных завершено")
+    from .graph_requests import GraphRequestView
+
+    bot.add_view(GraphRequestView())
     await bot.tree.sync()
 
 
