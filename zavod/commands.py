@@ -220,8 +220,14 @@ async def recipe_price_command(
     components = result["components"]
     ship_type = result.get("ship_type")
     efficiency_source = result.get("efficiency_source", "custom")
+    blueprint_cost = result.get("blueprint_cost")
+    creation_cost = result.get("creation_cost")
+    total_with_additions = result.get("total_with_additions")
+    unit_cost_with_additions = result.get("unit_cost_with_additions")
+    blueprint_components = result.get("blueprint_components", [])
+    blueprint_components_cost = result.get("blueprint_components_cost")
 
-    resource_lines = ["Ресурсы:"]
+    resource_lines = ["Ресурсы рецепта:"]
     if components:
         for component in components:
             quantity_display = format(component["quantity"], ",")
@@ -232,7 +238,20 @@ async def recipe_price_command(
                 )
             )
     else:
-        resource_lines.append(" • Нет компонентов")
+        resource_lines.append(" • Не указаны (не учтены)")
+
+    blueprint_resource_lines = ["Ресурсы чертежа:"]
+    if blueprint_components:
+        for component in blueprint_components:
+            quantity_display = format(component["quantity"], ",")
+            blueprint_resource_lines.append(
+                " • {name}: {quantity}".format(
+                    name=component["resource_name"],
+                    quantity=quantity_display,
+                )
+            )
+    else:
+        blueprint_resource_lines.append(" • Не указаны (не учтены)")
 
     logger.info(
         "Расчёт стоимости рецепта '%s' завершён: эффективность=%s, стоимость цикла=%s",
@@ -251,18 +270,55 @@ async def recipe_price_command(
 
     type_line = f"Тип корабля: {ship_type}" if ship_type else "Тип корабля: не указан"
 
-    await interaction.response.send_message(
-        "\n".join(
-            [
-                f"Расчёт для '{recipe_name}'",
-                efficiency_line,
-                type_line,
-                f"Количество на цикл: {output_quantity}",
-                f"Стоимость единицы: {unit_cost:,.2f}",
-                *resource_lines,
-                f"Итого за все: {run_cost:,.2f}",
-            ]
+    blueprint_components_line = (
+        f"Стоимость ресурсов чертежа: {blueprint_components_cost:,.2f}"
+        if blueprint_components
+        else "Стоимость ресурсов чертежа: не указана (не учтена)"
+    )
+
+    blueprint_line = (
+        f"Стоимость чертежа: {blueprint_cost:,.2f}"
+        if blueprint_cost is not None
+        else "Стоимость чертежа: не задана (не учтена)"
+    )
+    creation_line = (
+        f"Цена создания: {creation_cost:,.2f}"
+        if creation_cost is not None
+        else "Цена создания: не задана (не учтена)"
+    )
+
+    summary_lines = [
+        f"Расчёт для '{recipe_name}'",
+        efficiency_line,
+        type_line,
+        f"Количество на цикл: {output_quantity}",
+        f"Стоимость единицы: {unit_cost:,.2f}",
+        *resource_lines,
+        *blueprint_resource_lines,
+        f"Итого за все (без доп. расходов): {run_cost:,.2f}",
+        blueprint_components_line,
+        blueprint_line,
+        creation_line,
+    ]
+
+    additions_present = (
+        bool(blueprint_components)
+        or blueprint_cost is not None
+        or creation_cost is not None
+    )
+    if additions_present:
+        summary_lines.append(
+            f"Итого с доп. расходами: {total_with_additions:,.2f}"
         )
+        if unit_cost_with_additions is not None:
+            summary_lines.append(
+                "Стоимость единицы с доп. расходами: {value:,.2f}".format(
+                    value=unit_cost_with_additions
+                )
+            )
+
+    await interaction.response.send_message(
+        "\n".join(summary_lines)
     )
 
 
@@ -312,6 +368,198 @@ async def resource_price_autocomplete(
     return [
         app_commands.Choice(name=name, value=name) for name in resource_names
     ]
+
+
+@bot.tree.command(
+    name="set_recipe_blueprint_components",
+    description="Задать ресурсы для чертежа рецепта",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    recipe_name="Название рецепта",
+    table="Текстовая таблица с ресурсами чертежа",
+    file="Текстовый файл с таблицей чертежа",
+)
+async def set_recipe_blueprint_components_command(
+    interaction: discord.Interaction,
+    recipe_name: str,
+    table: Optional[str] = None,
+    file: Optional[discord.Attachment] = None,
+) -> None:
+    logger.info(
+        "Получена команда set_recipe_blueprint_components: пользователь=%s, рецепт=%s",
+        interaction.user,
+        recipe_name,
+    )
+    await interaction.response.defer(thinking=True)
+
+    table_text = table
+    if table_text is None:
+        attachment_text = await read_attachment_content(file)
+        table_text = attachment_text
+    if table_text is None:
+        await interaction.followup.send(
+            "Не найден текст ресурсов чертежа. Укажите таблицу в команде или приложите файл.",
+            ephemeral=False,
+        )
+        return
+
+    try:
+        components = parse_recipe_table(table_text)
+        await database.set_recipe_blueprint_components(recipe_name, components)
+    except ValueError as exc:
+        await interaction.followup.send(
+            f"Ошибка разбора таблицы: {exc}", ephemeral=False
+        )
+        return
+    except RecipeNotFoundError:
+        await interaction.followup.send(
+            f"Рецепт '{recipe_name}' не найден", ephemeral=False
+        )
+        return
+    except Exception as exc:  # pragma: no cover - защита от неожиданных ошибок
+        logger.exception("Unexpected error while setting blueprint components")
+        await interaction.followup.send(
+            f"Произошла непредвиденная ошибка: {exc}", ephemeral=False
+        )
+        return
+
+    await interaction.followup.send(
+        "Для чертежа рецепта '{recipe}' сохранено {count} компонентов.".format(
+            recipe=recipe_name,
+            count=len(components),
+        ),
+        ephemeral=False,
+    )
+
+
+@set_recipe_blueprint_components_command.autocomplete("recipe_name")
+async def set_recipe_blueprint_components_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    del interaction
+    recipe_names = await database.search_recipe_names(current)
+    return [app_commands.Choice(name=name, value=name) for name in recipe_names]
+
+
+@bot.tree.command(
+    name="set_recipe_blueprint_cost",
+    description="Установить стоимость чертежа рецепта",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    recipe_name="Название рецепта",
+    value="Стоимость чертежа",
+)
+async def set_recipe_blueprint_cost_command(
+    interaction: discord.Interaction,
+    recipe_name: str,
+    value: float,
+) -> None:
+    logger.info(
+        "Получена команда set_recipe_blueprint_cost: пользователь=%s, рецепт=%s, стоимость=%s",
+        interaction.user,
+        recipe_name,
+        value,
+    )
+    try:
+        cost = parse_decimal(str(value))
+    except ValueError:
+        await interaction.response.send_message(
+            "Стоимость должна быть числом",
+            ephemeral=False,
+        )
+        return
+    if cost < 0:
+        await interaction.response.send_message(
+            "Стоимость не может быть отрицательной",
+            ephemeral=False,
+        )
+        return
+    try:
+        await database.set_recipe_blueprint_cost(recipe_name, cost)
+    except RecipeNotFoundError:
+        await interaction.response.send_message(
+            f"Рецепт '{recipe_name}' не найден",
+            ephemeral=False,
+        )
+        return
+    await interaction.response.send_message(
+        "Стоимость чертежа для '{recipe}' установлена на {cost}".format(
+            recipe=recipe_name,
+            cost=_format_decimal(cost),
+        ),
+        ephemeral=False,
+    )
+
+
+@set_recipe_blueprint_cost_command.autocomplete("recipe_name")
+async def set_recipe_blueprint_cost_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    del interaction
+    recipe_names = await database.search_recipe_names(current)
+    return [app_commands.Choice(name=name, value=name) for name in recipe_names]
+
+
+@bot.tree.command(
+    name="set_recipe_creation_cost",
+    description="Установить цену создания рецепта",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    recipe_name="Название рецепта",
+    value="Цена создания",
+)
+async def set_recipe_creation_cost_command(
+    interaction: discord.Interaction,
+    recipe_name: str,
+    value: float,
+) -> None:
+    logger.info(
+        "Получена команда set_recipe_creation_cost: пользователь=%s, рецепт=%s, стоимость=%s",
+        interaction.user,
+        recipe_name,
+        value,
+    )
+    try:
+        cost = parse_decimal(str(value))
+    except ValueError:
+        await interaction.response.send_message(
+            "Стоимость должна быть числом",
+            ephemeral=False,
+        )
+        return
+    if cost < 0:
+        await interaction.response.send_message(
+            "Стоимость не может быть отрицательной",
+            ephemeral=False,
+        )
+        return
+    try:
+        await database.set_recipe_creation_cost(recipe_name, cost)
+    except RecipeNotFoundError:
+        await interaction.response.send_message(
+            f"Рецепт '{recipe_name}' не найден",
+            ephemeral=False,
+        )
+        return
+    await interaction.response.send_message(
+        "Цена создания для '{recipe}' установлена на {cost}".format(
+            recipe=recipe_name,
+            cost=_format_decimal(cost),
+        ),
+        ephemeral=False,
+    )
+
+
+@set_recipe_creation_cost_command.autocomplete("recipe_name")
+async def set_recipe_creation_cost_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    del interaction
+    recipe_names = await database.search_recipe_names(current)
+    return [app_commands.Choice(name=name, value=name) for name in recipe_names]
 
 
 @bot.tree.command(name="set_efficiency", description="Установить глобальную эффективность")
