@@ -433,7 +433,7 @@ class Database:
 
         cursor = await self._conn.execute(
             """
-            SELECT id, name, output_quantity, is_temporary
+            SELECT id, name, output_quantity, is_temporary, ship_type
             FROM recipes
             WHERE name = ?
             """,
@@ -861,7 +861,9 @@ class Database:
             "Рассчитываю стоимость рецепта '%s' с эффективностью %s", recipe_name, efficiency
         )
 
-        async def resource_cost(resource_name: str, visiting: set[str]) -> Decimal:
+        async def resource_cost(
+            resource_name: str, visiting: set[str]
+        ) -> tuple[Decimal, dict[str, tuple[Decimal, Decimal]]]:
             if resource_name in visiting:
                 raise CircularRecipeReferenceError(
                     f"Circular reference detected for resource '{resource_name}'"
@@ -873,8 +875,8 @@ class Database:
                     resource_name,
                 )
                 visiting.add(resource_name)
-                cost_per_run, _ = await recipe_cost(
-                    nested_recipe, visiting, collect_components=False
+                cost_per_run, nested_breakdown = await recipe_cost(
+                    nested_recipe, visiting
                 )
                 visiting.remove(resource_name)
                 output_quantity = Decimal(str(nested_recipe["output_quantity"]))
@@ -882,7 +884,12 @@ class Database:
                     raise ValueError(
                         f"Recipe '{resource_name}' must have positive output quantity"
                     )
-                return cost_per_run / output_quantity
+                unit_cost = cost_per_run / output_quantity
+                aggregated_per_unit = {
+                    base_name: (quantity / output_quantity, unit_price)
+                    for base_name, (quantity, unit_price) in nested_breakdown.items()
+                }
+                return unit_cost, aggregated_per_unit
 
             price = await self.get_resource_unit_price(resource_name)
             if price is None:
@@ -894,24 +901,25 @@ class Database:
                 resource_name,
                 price,
             )
-            return Decimal(str(price))
+            unit_price = Decimal(str(price))
+            return unit_price, {resource_name: (Decimal("1"), unit_price)}
 
         async def recipe_cost(
-            recipe: dict[str, Any],
-            visiting: set[str],
-            *,
-            collect_components: bool,
-        ) -> tuple[Decimal, list[dict[str, Decimal]]]:
+            recipe: dict[str, Any], visiting: set[str]
+        ) -> tuple[Decimal, dict[str, tuple[Decimal, Decimal]]]:
             logger.debug(
                 "Начинаю расчёт стоимости рецепта '%s' для %s компонентов",
                 recipe["name"],
                 len(recipe["components"]),
             )
             total = Decimal("0")
-            breakdown: list[dict[str, Decimal]] = []
+            breakdown: dict[str, tuple[Decimal, Decimal]] = {}
             for component in recipe["components"]:
                 component_quantity = Decimal(str(component["quantity"])) * multiplier
-                component_cost = await resource_cost(component["resource_name"], visiting)
+                (
+                    component_cost,
+                    component_breakdown,
+                ) = await resource_cost(component["resource_name"], visiting)
                 total_cost = component_quantity * component_cost
                 total += total_cost
                 logger.debug(
@@ -921,19 +929,20 @@ class Database:
                     component_cost,
                     total,
                 )
-                if collect_components:
-                    breakdown.append(
-                        {
-                            "resource_name": component["resource_name"],
-                            "quantity": component_quantity,
-                            "unit_cost": component_cost,
-                            "total_cost": total_cost,
-                        }
-                    )
+                for base_name, (quantity_per_unit, unit_price) in component_breakdown.items():
+                    total_quantity = quantity_per_unit * component_quantity
+                    if base_name in breakdown:
+                        current_quantity, _ = breakdown[base_name]
+                        breakdown[base_name] = (
+                            current_quantity + total_quantity,
+                            unit_price,
+                        )
+                    else:
+                        breakdown[base_name] = (total_quantity, unit_price)
             return total, breakdown
 
-        total_run_cost, breakdown = await recipe_cost(
-            base_recipe, {recipe_name}, collect_components=True
+        total_run_cost, aggregated_breakdown = await recipe_cost(
+            base_recipe, {recipe_name}
         )
         output_quantity = Decimal(str(base_recipe["output_quantity"]))
         unit_cost = total_run_cost / output_quantity
@@ -948,12 +957,21 @@ class Database:
             total_run_cost,
             unit_cost,
         )
+        components_breakdown = [
+            {
+                "resource_name": name,
+                "quantity": quantity,
+                "unit_cost": unit_price,
+                "total_cost": unit_price * quantity,
+            }
+            for name, (quantity, unit_price) in sorted(aggregated_breakdown.items())
+        ]
         return {
             "efficiency": efficiency,
             "run_cost": total_run_cost,
             "unit_cost": unit_cost,
             "output_quantity": output_quantity,
-            "components": breakdown,
+            "components": components_breakdown,
             "ship_type": base_recipe.get("ship_type"),
             "efficiency_source": efficiency_source,
         }
