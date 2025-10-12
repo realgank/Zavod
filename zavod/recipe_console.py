@@ -217,9 +217,8 @@ class RecipeSubmitModal(discord.ui.Modal, title="Добавить рецепт")
         style=discord.TextStyle.paragraph,
         placeholder=(
             "Стоимость чертежа: 1 500 000\n"
-            "Стоимость создания чертежа: 250 000\n"
-            "Стоимость создания рецепта: 750 000\n"
-            "ID    Название    Количество    Оценка стоимости"
+            "Создание чертежа: 250 000\n"
+            "ID Название Кол-во Стоимость"
         ),
         required=False,
         max_length=4000,
