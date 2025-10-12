@@ -23,6 +23,55 @@ async def _run_bot(token: str) -> None:
         await database.close()
 
 
+def _configure_logging_from_environment() -> None:
+    """Дополнительно настраивает логирование на основе переменных окружения."""
+
+    root_logger = logging.getLogger()
+
+    log_level_name = os.getenv("LOG_LEVEL")
+    if log_level_name:
+        try:
+            level = getattr(logging, log_level_name.upper())
+        except AttributeError:
+            logger.warning(
+                "Неизвестный уровень логирования '%s', использую уровень INFO по умолчанию",
+                log_level_name,
+            )
+        else:
+            root_logger.setLevel(level)
+            logger.info("Установлен уровень логирования %s", log_level_name.upper())
+
+    log_file = os.getenv("LOG_FILE")
+    if log_file:
+        log_path = Path(log_file).expanduser()
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            if any(
+                isinstance(handler, logging.FileHandler)
+                and Path(getattr(handler, "baseFilename", "")) == log_path
+                for handler in root_logger.handlers
+            ):
+                logger.debug(
+                    "Логирование в файл %s уже настроено, повторное добавление пропущено",
+                    log_path,
+                )
+            else:
+                file_handler = logging.FileHandler(log_path, encoding="utf-8")
+                file_handler.setFormatter(
+                    logging.Formatter(
+                        "%(asctime)s %(levelname)s %(name)s: %(message)s"
+                    )
+                )
+                root_logger.addHandler(file_handler)
+                logger.info("Добавлено логирование в файл %s", log_path)
+        except OSError as exc:
+            logger.error(
+                "Не удалось настроить логирование в файл %s: %s",
+                log_path,
+                exc,
+            )
+
+
 def main() -> None:
     base_dir = Path(__file__).resolve().parent
     env_locations = [
@@ -36,6 +85,8 @@ def main() -> None:
             continue
         load_env_file(resolved)
         seen.add(resolved)
+
+    _configure_logging_from_environment()
 
     # Import modules that register commands and events after environment is configured.
     from . import commands  # noqa: F401
@@ -80,7 +131,11 @@ def main() -> None:
             "Файл базы данных '%s' не найден. Запускаю инициализацию базы данных.",
             database.path,
         )
-        asyncio.run(initialise_database(database.path))
+        try:
+            asyncio.run(initialise_database(database.path))
+        except Exception:
+            logger.exception("Ошибка при инициализации базы данных")
+            raise
     else:
         logger.info("Файл базы данных найден, инициализация не требуется")
 
@@ -88,6 +143,9 @@ def main() -> None:
         asyncio.run(_run_bot(token))
     except KeyboardInterrupt:
         logger.info("Остановка бота по сигналу KeyboardInterrupt")
+    except Exception:
+        logger.exception("Бот завершился с ошибкой")
+        raise
 
 
 __all__ = ["main"]
