@@ -19,6 +19,10 @@ from .config import LAST_COMMAND_CHANNEL_CONFIG_KEY, RECIPE_FEED_CHANNEL_ID, STA
 from .core import bot, database
 from .notifications import send_restart_log
 from .recipes import notify_recipe_added, parse_recipe_table, read_attachment_content
+from .recipe_console import (
+    refresh_recipe_console_message,
+    set_recipe_console_channel,
+)
 from .settings_console import (
     refresh_settings_console_message,
     set_settings_console_channel,
@@ -806,6 +810,50 @@ async def refresh_settings_console_command(
         message = "Консоль настроек обновлена."
     else:
         message = "Не удалось обновить консоль. Проверьте, настроен ли канал."
+    await interaction.response.send_message(message, ephemeral=True)
+
+
+@bot.tree.command(
+    name="set_recipe_console_channel",
+    description="Назначить канал панели добавления рецептов",
+)
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(channel="Текстовый канал для публикации панели")
+async def set_recipe_console_channel_command(
+    interaction: discord.Interaction, channel: discord.TextChannel
+) -> None:
+    logger.info(
+        "Получена команда set_recipe_console_channel: пользователь=%s, канал=%s",
+        interaction.user,
+        channel,
+    )
+    success = await set_recipe_console_channel(channel)
+    if success:
+        message = f"Панель добавления рецептов размещена в канале {channel.mention}."
+    else:
+        message = (
+            "Не удалось опубликовать панель добавления рецептов. Проверьте права доступа."
+        )
+    await interaction.response.send_message(message, ephemeral=False)
+
+
+@bot.tree.command(
+    name="refresh_recipe_console",
+    description="Обновить панель добавления рецептов",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def refresh_recipe_console_command(
+    interaction: discord.Interaction,
+) -> None:
+    logger.info(
+        "Получена команда refresh_recipe_console: пользователь=%s",
+        interaction.user,
+    )
+    success = await refresh_recipe_console_message()
+    if success:
+        message = "Панель добавления рецептов обновлена."
+    else:
+        message = "Не удалось обновить панель. Проверьте настройку канала."
     await interaction.response.send_message(message, ephemeral=True)
 
 
