@@ -7,7 +7,7 @@ from pathlib import Path
 
 from database import initialise_database
 
-from .core import bot, database, intents
+from .core import DEFAULT_LOG_FILE, bot, database, intents
 from .env import env_flag, load_env_file
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,17 @@ def _configure_logging_from_environment() -> None:
         log_path = Path(log_file).expanduser()
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
+
+            for handler in list(root_logger.handlers):
+                if isinstance(handler, logging.FileHandler) and DEFAULT_LOG_FILE:
+                    handler_path = Path(getattr(handler, "baseFilename", ""))
+                    if handler_path == DEFAULT_LOG_FILE and log_path != DEFAULT_LOG_FILE:
+                        root_logger.removeHandler(handler)
+                        handler.close()
+                        logger.info(
+                            "Отключено логирование в файл по умолчанию %s", DEFAULT_LOG_FILE
+                        )
+
             if any(
                 isinstance(handler, logging.FileHandler)
                 and Path(getattr(handler, "baseFilename", "")) == log_path
@@ -70,6 +81,11 @@ def _configure_logging_from_environment() -> None:
                 log_path,
                 exc,
             )
+    elif DEFAULT_LOG_FILE:
+        logger.info(
+            "Используется файл логирования по умолчанию %s для записи всех действий",
+            DEFAULT_LOG_FILE,
+        )
 
 
 def main() -> None:
