@@ -1309,9 +1309,41 @@ class Database:
         }
 
 
+THOUSAND_SEPARATORS = {
+    " ",
+    "\u00A0",  # no-break space
+    "\u202F",  # narrow no-break space
+    "\u2007",  # figure space
+    "\u2009",  # thin space
+    "\u2002",  # en space
+    "\u2003",  # em space
+    "\u2004",  # three-per-em space
+    "\u2005",  # four-per-em space
+    "\u2006",  # six-per-em space
+    "\u2008",  # punctuation space
+    "\u200A",  # hair space
+    "'",
+    "_",
+}
+
+
 def parse_decimal(value: str) -> Decimal:
+    normalised = value.strip().replace("\u200b", "")
+
+    for separator in THOUSAND_SEPARATORS:
+        normalised = normalised.replace(separator, "")
+
+    if "," in normalised and "." in normalised:
+        if normalised.rfind(",") > normalised.rfind("."):
+            normalised = normalised.replace(".", "")
+            normalised = normalised.replace(",", ".")
+        else:
+            normalised = normalised.replace(",", "")
+    elif "," in normalised:
+        normalised = normalised.replace(",", ".")
+
     try:
-        return Decimal(value)
+        return Decimal(normalised)
     except InvalidOperation as exc:
         raise ValueError(f"Cannot parse decimal value from '{value}'") from exc
 

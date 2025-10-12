@@ -123,8 +123,14 @@ def parse_recipe_table(raw_table: str) -> list[RecipeComponent]:
         "valuation",
         "cost",
     }
+    separator_class = " _'\u00A0\u202F\u2000-\u200A.,"
+    number_pattern = (
+        r"(?:\d{1,3}(?:["
+        + separator_class
+        + r"]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)"
+    )
     inline_pattern = re.compile(
-        r"(?<!\S)(\d+)\s+(.+?)\s+([0-9]+(?:[.][0-9]+)?)\s+([0-9]+(?:[.][0-9]+)?)(?=(?:\s+\d+\s)|\s*$)"
+        rf"(?<!\S)(\d+)\s+(.+?)\s+({number_pattern})\s+({number_pattern})(?=(?:\s+\d+)|\s*$)"
     )
 
     for line in lines:
