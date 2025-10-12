@@ -24,8 +24,18 @@ async def _run_bot(token: str) -> None:
 
 
 def main() -> None:
-    env_file = Path(__file__).resolve().parent / ".env"
-    load_env_file(env_file)
+    base_dir = Path(__file__).resolve().parent
+    env_locations = [
+        base_dir / ".env",
+        base_dir.parent / ".env",
+    ]
+    seen: set[Path] = set()
+    for env_path in env_locations:
+        resolved = env_path.resolve()
+        if resolved in seen:
+            continue
+        load_env_file(resolved)
+        seen.add(resolved)
 
     # Import modules that register commands and events after environment is configured.
     from . import commands  # noqa: F401
