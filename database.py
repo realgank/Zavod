@@ -142,12 +142,38 @@ async def _migration_5_add_blueprint_components_table(
     )
 
 
+async def _migration_6_add_blueprint_creation_cost(
+    conn: aiosqlite.Connection,
+) -> None:
+    """Add blueprint creation cost field to recipes."""
+
+    logger.info(
+        "Выполняю миграцию схемы #6: добавление стоимости создания чертежа"
+    )
+    cursor = await conn.execute("PRAGMA table_info(recipes)")
+    columns = [row["name"] for row in await cursor.fetchall()]
+    await cursor.close()
+
+    if "blueprint_creation_cost" not in columns:
+        logger.info(
+            "Добавляю столбец blueprint_creation_cost в таблицу recipes"
+        )
+        await conn.execute(
+            "ALTER TABLE recipes ADD COLUMN blueprint_creation_cost REAL"
+        )
+    else:
+        logger.info(
+            "Столбец blueprint_creation_cost уже существует, пропускаю добавление"
+        )
+
+
 MIGRATIONS: dict[int, Migration] = {
     1: _migration_1_initialise_schema_version,
     2: _migration_2_add_recipe_status,
     3: _migration_3_add_ship_type_support,
     4: _migration_4_add_recipe_cost_fields,
     5: _migration_5_add_blueprint_components_table,
+    6: _migration_6_add_blueprint_creation_cost,
 }
 
 CURRENT_SCHEMA_VERSION = max(MIGRATIONS.keys(), default=0)
@@ -252,6 +278,7 @@ class Database:
                 is_temporary INTEGER NOT NULL DEFAULT 0,
                 ship_type TEXT,
                 blueprint_cost REAL,
+                blueprint_creation_cost REAL,
                 creation_cost REAL
             );
 
@@ -510,6 +537,32 @@ class Database:
                     f"Recipe '{name}' is not defined"
                 )
 
+    async def set_recipe_blueprint_creation_cost(
+        self, name: str, cost: Optional[Decimal]
+    ) -> None:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        async with self._lock:
+            logger.info(
+                "Обновляю стоимость создания чертежа рецепта '%s': %s", name, cost
+            )
+            cursor = await self._conn.execute(
+                "UPDATE recipes SET blueprint_creation_cost = ? WHERE name = ?",
+                (float(cost) if cost is not None else None, name),
+            )
+            await self._conn.commit()
+            updated = cursor.rowcount > 0
+            await cursor.close()
+            if not updated:
+                logger.warning(
+                    "Не удалось обновить стоимость создания чертежа: рецепт '%s' не найден",
+                    name,
+                )
+                raise RecipeNotFoundError(
+                    f"Recipe '{name}' is not defined"
+                )
+
     async def set_recipe_creation_cost(
         self, name: str, cost: Optional[Decimal]
     ) -> None:
@@ -620,6 +673,7 @@ class Database:
                 is_temporary,
                 ship_type,
                 blueprint_cost,
+                blueprint_creation_cost,
                 creation_cost
             FROM recipes
             WHERE name = ?
@@ -665,6 +719,7 @@ class Database:
             "is_temporary": bool(row["is_temporary"]),
             "ship_type": (row["ship_type"] or None),
             "blueprint_cost": row["blueprint_cost"],
+            "blueprint_creation_cost": row["blueprint_creation_cost"],
             "creation_cost": row["creation_cost"],
             "components": components,
             "blueprint_components": blueprint_components,
@@ -1179,22 +1234,30 @@ class Database:
                 Decimal("1"),
             )
         raw_blueprint_cost = base_recipe.get("blueprint_cost")
-        raw_creation_cost = base_recipe.get("creation_cost")
+        raw_blueprint_creation_cost = base_recipe.get("blueprint_creation_cost")
+        raw_recipe_creation_cost = base_recipe.get("creation_cost")
         blueprint_cost: Optional[Decimal]
-        creation_cost: Optional[Decimal]
+        blueprint_creation_cost: Optional[Decimal]
+        recipe_creation_cost: Optional[Decimal]
         if raw_blueprint_cost is None:
             blueprint_cost = None
         else:
             blueprint_cost = Decimal(str(raw_blueprint_cost))
-        if raw_creation_cost is None:
-            creation_cost = None
+        if raw_blueprint_creation_cost is None:
+            blueprint_creation_cost = None
         else:
-            creation_cost = Decimal(str(raw_creation_cost))
+            blueprint_creation_cost = Decimal(str(raw_blueprint_creation_cost))
+        if raw_recipe_creation_cost is None:
+            recipe_creation_cost = None
+        else:
+            recipe_creation_cost = Decimal(str(raw_recipe_creation_cost))
         total_with_additions = total_run_cost + blueprint_components_cost
         if blueprint_cost is not None:
             total_with_additions += blueprint_cost
-        if creation_cost is not None:
-            total_with_additions += creation_cost
+        if blueprint_creation_cost is not None:
+            total_with_additions += blueprint_creation_cost
+        if recipe_creation_cost is not None:
+            total_with_additions += recipe_creation_cost
         if output_quantity > 0:
             unit_cost_with_additions = total_with_additions / output_quantity
         else:
@@ -1239,7 +1302,8 @@ class Database:
             "ship_type": base_recipe.get("ship_type"),
             "efficiency_source": efficiency_source,
             "blueprint_cost": blueprint_cost,
-            "creation_cost": creation_cost,
+            "blueprint_creation_cost": blueprint_creation_cost,
+            "creation_cost": recipe_creation_cost,
             "total_with_additions": total_with_additions,
             "unit_cost_with_additions": unit_cost_with_additions,
             "blueprint_components": blueprint_components_breakdown,

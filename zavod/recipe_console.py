@@ -6,7 +6,7 @@ from typing import Optional
 
 import discord
 
-from database import parse_decimal
+from database import RecipeComponent, parse_decimal
 
 from .config import RECIPE_FEED_CHANNEL_ID
 from .core import bot, database
@@ -115,7 +115,10 @@ async def build_recipe_console_embed() -> discord.Embed:
         value=(
             "Скопируйте таблицу рецепта из игры или другого источника и вставьте её "
             "в поле формы. Столбцы должны содержать ID, название, количество и "
-            "оценку стоимости."
+            "оценку стоимости. При необходимости укажите в дополнительном поле "
+            "стоимость чертежа, стоимость создания чертежа, стоимость создания "
+            "рецепта и таблицу ресурсов чертежа. Цена рецепта рассчитывается "
+            "автоматически на основе стоимости компонентов."
         ),
         inline=False,
     )
@@ -211,12 +214,25 @@ class RecipeSubmitModal(discord.ui.Modal, title="Добавить рецепт")
         required=True,
         max_length=4000,
     )
+    blueprint_data_input = discord.ui.TextInput(
+        label="Чертёж и дополнительные расходы",
+        style=discord.TextStyle.paragraph,
+        placeholder=(
+            "Стоимость чертежа: 1 500 000\n"
+            "Стоимость создания чертежа: 150 000\n"
+            "Стоимость создания рецепта: 750 000\n"
+            "ID    Название    Количество    Оценка стоимости"
+        ),
+        required=False,
+        max_length=4000,
+    )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         recipe_name = str(self.recipe_name_input.value or "").strip()
         ship_type = str(self.ship_type_input.value or "").strip()
         output_quantity_raw = str(self.output_quantity_input.value or "1").strip()
         components_text = str(self.components_input.value or "").strip()
+        blueprint_data_text = str(self.blueprint_data_input.value or "").strip()
 
         if not recipe_name:
             await interaction.response.send_message(
@@ -262,6 +278,119 @@ class RecipeSubmitModal(discord.ui.Modal, title="Добавить рецепт")
             )
             return
 
+        blueprint_cost: Optional[Decimal] = None
+        blueprint_creation_cost: Optional[Decimal] = None
+        recipe_creation_cost: Optional[Decimal] = None
+        blueprint_components: list[RecipeComponent] = []
+
+        if blueprint_data_text:
+            blueprint_lines = [
+                line.strip()
+                for line in blueprint_data_text.splitlines()
+                if line.strip()
+            ]
+            blueprint_table_lines: list[str] = []
+            blueprint_cost_prefixes = (
+                "стоимость чертежа",
+                "цена чертежа",
+                "blueprint cost",
+                "blueprint_cost",
+            )
+            blueprint_creation_cost_prefixes = (
+                "стоимость создания чертежа",
+                "цена создания чертежа",
+                "blueprint creation cost",
+                "blueprint_creation_cost",
+            )
+            recipe_creation_cost_prefixes = (
+                "стоимость создания рецепта",
+                "цена создания рецепта",
+                "стоимость создания",
+                "цена создания",
+                "creation cost",
+                "creation_cost",
+            )
+            for line in blueprint_lines:
+                lower_line = line.lower()
+                if any(
+                    lower_line.startswith(prefix + ":")
+                    for prefix in blueprint_cost_prefixes
+                ):
+                    raw_cost = line.split(":", 1)[1].strip()
+                    if raw_cost:
+                        try:
+                            blueprint_cost = parse_decimal(raw_cost)
+                        except ValueError:
+                            await interaction.response.send_message(
+                                "Стоимость чертежа должна быть числом.",
+                                ephemeral=True,
+                            )
+                            return
+                        if blueprint_cost < 0:
+                            await interaction.response.send_message(
+                                "Стоимость чертежа не может быть отрицательной.",
+                                ephemeral=True,
+                            )
+                            return
+                    continue
+                if any(
+                    lower_line.startswith(prefix + ":")
+                    for prefix in blueprint_creation_cost_prefixes
+                ):
+                    raw_blueprint_creation_cost = line.split(":", 1)[1].strip()
+                    if raw_blueprint_creation_cost:
+                        try:
+                            blueprint_creation_cost = parse_decimal(
+                                raw_blueprint_creation_cost
+                            )
+                        except ValueError:
+                            await interaction.response.send_message(
+                                "Стоимость создания чертежа должна быть числом.",
+                                ephemeral=True,
+                            )
+                            return
+                        if blueprint_creation_cost < 0:
+                            await interaction.response.send_message(
+                                "Стоимость создания чертежа не может быть отрицательной.",
+                                ephemeral=True,
+                            )
+                            return
+                    continue
+                if any(
+                    lower_line.startswith(prefix + ":")
+                    for prefix in recipe_creation_cost_prefixes
+                ):
+                    raw_creation_cost = line.split(":", 1)[1].strip()
+                    if raw_creation_cost:
+                        try:
+                            recipe_creation_cost = parse_decimal(raw_creation_cost)
+                        except ValueError:
+                            await interaction.response.send_message(
+                                "Стоимость создания рецепта должна быть числом.",
+                                ephemeral=True,
+                            )
+                            return
+                        if recipe_creation_cost < 0:
+                            await interaction.response.send_message(
+                                "Стоимость создания рецепта не может быть отрицательной.",
+                                ephemeral=True,
+                            )
+                            return
+                    continue
+                blueprint_table_lines.append(line)
+
+            if blueprint_table_lines:
+                try:
+                    blueprint_components = parse_recipe_table(
+                        "\n".join(blueprint_table_lines)
+                    )
+                except ValueError as exc:
+                    await interaction.response.send_message(
+                        f"Ошибка разбора ресурсов чертежа: {exc}",
+                        ephemeral=True,
+                    )
+                    return
+
         try:
             await database.add_recipe(
                 name=recipe_name,
@@ -278,8 +407,85 @@ class RecipeSubmitModal(discord.ui.Modal, title="Добавить рецепт")
             )
             return
 
+        post_save_updates: list[str] = []
+
+        try:
+            if blueprint_cost is not None:
+                await database.set_recipe_blueprint_cost(recipe_name, blueprint_cost)
+                post_save_updates.append("Стоимость чертежа сохранена.")
+        except Exception as exc:
+            logger.exception(
+                "Неожиданная ошибка при сохранении стоимости чертежа",
+                exc_info=exc,
+            )
+            await interaction.response.send_message(
+                "Рецепт сохранён, но не удалось обновить стоимость чертежа.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            if blueprint_creation_cost is not None:
+                await database.set_recipe_blueprint_creation_cost(
+                    recipe_name, blueprint_creation_cost
+                )
+                post_save_updates.append(
+                    "Стоимость создания чертежа сохранена."
+                )
+        except Exception as exc:
+            logger.exception(
+                "Неожиданная ошибка при сохранении стоимости создания чертежа",
+                exc_info=exc,
+            )
+            await interaction.response.send_message(
+                "Рецепт сохранён, но не удалось обновить стоимость создания чертежа.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            if recipe_creation_cost is not None:
+                await database.set_recipe_creation_cost(
+                    recipe_name, recipe_creation_cost
+                )
+                post_save_updates.append(
+                    "Стоимость создания рецепта сохранена."
+                )
+        except Exception as exc:
+            logger.exception(
+                "Неожиданная ошибка при сохранении стоимости создания рецепта",
+                exc_info=exc,
+            )
+            await interaction.response.send_message(
+                "Рецепт сохранён, но не удалось обновить стоимость создания рецепта.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            if blueprint_components:
+                await database.set_recipe_blueprint_components(
+                    recipe_name, blueprint_components
+                )
+                post_save_updates.append("Ресурсы чертежа сохранены.")
+        except Exception as exc:
+            logger.exception(
+                "Неожиданная ошибка при сохранении ресурсов чертежа",
+                exc_info=exc,
+            )
+            await interaction.response.send_message(
+                "Рецепт сохранён, но не удалось обновить ресурсы чертежа.",
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.send_message(
-            "Рецепт отправлен на проверку. Подтверждение доступно в канале с лентой рецептов.",
+            "\n".join(
+                [
+                    "Рецепт отправлен на проверку. Подтверждение доступно в канале с лентой рецептов.",
+                    *post_save_updates,
+                ]
+            ),
             ephemeral=True,
         )
 
