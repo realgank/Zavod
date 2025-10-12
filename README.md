@@ -42,6 +42,9 @@ export GITHUB_USERNAME=ВАШ_ЛОГИН
 export GITHUB_TOKEN=ВАШ_PERSONAL_ACCESS_TOKEN
 # Путь к базе данных (опционально, позволяет использовать общую базу для нескольких серверов)
 export DATABASE_PATH=/srv/zavod/zavod.db
+# Логирование (опционально, помогает отлаживать запуск под systemd)
+export LOG_FILE=/var/log/zavod/bot.log
+export LOG_LEVEL=INFO
 ```
 
 ## Запуск
