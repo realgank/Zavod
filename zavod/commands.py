@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from decimal import Decimal
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import discord
 from discord import app_commands
@@ -63,6 +63,56 @@ def _match_ship_types(types: list[str], current: str) -> list[app_commands.Choic
     return [app_commands.Choice(name=value, value=value) for value in filtered]
 
 
+def _format_optional_cost(
+    label: str,
+    value: Optional[Decimal],
+    missing_note: str,
+) -> str:
+    if value is None:
+        return f" • {label}: {missing_note}"
+    return f" • {label}: {value:,.2f}"
+
+
+def _format_resource_lines(
+    title: str, components: list[dict[str, object]]
+) -> list[str]:
+    if not components:
+        return [title, " • Не указаны (не учтены)"]
+    return [
+        title,
+        *[
+            " • {name}: {quantity}".format(
+                name=component["resource_name"],
+                quantity=format(component["quantity"], ","),
+            )
+            for component in components
+        ],
+    ]
+
+
+def _format_efficiency_line(
+    efficiency_source: str, ship_type: Optional[str], effective_efficiency: Decimal
+) -> str:
+    if efficiency_source == "ship_type" and ship_type:
+        return f"Эффективность типа '{ship_type}': {effective_efficiency}%"
+    if efficiency_source == "global":
+        return f"Эффективность (глобальная): {effective_efficiency}%"
+    return f"Эффективность: {effective_efficiency}%"
+
+
+async def _read_table_input(
+    table: Optional[str],
+    file: Optional[discord.Attachment],
+    on_missing: Callable[[], Awaitable[None]],
+) -> Optional[str]:
+    if table is not None:
+        return table
+    if file is not None:
+        return await read_attachment_content(file)
+    await on_missing()
+    return None
+
+
 @bot.tree.command(name="add_recipe", description="Добавить или обновить рецепт")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
@@ -106,15 +156,14 @@ async def add_recipe_command(
 
     await interaction.response.defer(thinking=True)
 
-    table_text = table
-    if table_text is None:
-        attachment_text = await read_attachment_content(file)
-        table_text = attachment_text
-    if table_text is None:
+    async def notify_missing_table() -> None:
         await interaction.followup.send(
             "Не найден текст рецепта. Отправьте таблицу в поле команды или приложите файл.",
             ephemeral=False,
         )
+
+    table_text = await _read_table_input(table, file, notify_missing_table)
+    if table_text is None:
         return
 
     try:
@@ -232,31 +281,10 @@ async def recipe_price_command(
     blueprint_components = result.get("blueprint_components", [])
     blueprint_components_cost = result.get("blueprint_components_cost")
 
-    resource_lines = ["Ресурсы рецепта:"]
-    if components:
-        for component in components:
-            quantity_display = format(component["quantity"], ",")
-            resource_lines.append(
-                " • {name}: {quantity}".format(
-                    name=component["resource_name"],
-                    quantity=quantity_display,
-                )
-            )
-    else:
-        resource_lines.append(" • Не указаны (не учтены)")
-
-    blueprint_resource_lines = ["Ресурсы чертежа:"]
-    if blueprint_components:
-        for component in blueprint_components:
-            quantity_display = format(component["quantity"], ",")
-            blueprint_resource_lines.append(
-                " • {name}: {quantity}".format(
-                    name=component["resource_name"],
-                    quantity=quantity_display,
-                )
-            )
-    else:
-        blueprint_resource_lines.append(" • Не указаны (не учтены)")
+    resource_lines = _format_resource_lines("Ресурсы рецепта:", components)
+    blueprint_resource_lines = _format_resource_lines(
+        "Ресурсы чертежа:", blueprint_components
+    )
 
     logger.info(
         "Расчёт стоимости рецепта '%s' завершён: эффективность=%s, стоимость цикла=%s",
@@ -264,21 +292,10 @@ async def recipe_price_command(
         effective_efficiency,
         run_cost,
     )
-    if efficiency_source == "ship_type" and ship_type:
-        efficiency_line = (
-            f"Эффективность типа '{ship_type}': {effective_efficiency}%"
-        )
-    elif efficiency_source == "global":
-        efficiency_line = f"Эффективность (глобальная): {effective_efficiency}%"
-    else:
-        efficiency_line = f"Эффективность: {effective_efficiency}%"
-
-    type_line = f"Тип корабля: {ship_type}" if ship_type else "Тип корабля: не указан"
-
     summary_lines = [
         f"Расчёт для '{recipe_name}'",
-        efficiency_line,
-        type_line,
+        _format_efficiency_line(efficiency_source, ship_type, effective_efficiency),
+        f"Тип корабля: {ship_type}" if ship_type else "Тип корабля: не указан",
         f"Количество на цикл: {output_quantity}",
         f"Стоимость единицы: {unit_cost:,.2f}",
     ]
@@ -287,10 +304,8 @@ async def recipe_price_command(
     summary_lines.append("Рецепт:")
     summary_lines.append(f" • Цена (компоненты): {run_cost:,.2f}")
     summary_lines.append(
-        (
-            f" • Стоимость создания: {creation_cost:,.2f}"
-            if creation_cost is not None
-            else " • Стоимость создания: не задана (не учтена)"
+        _format_optional_cost(
+            "Стоимость создания", creation_cost, "не задана (не учтена)"
         )
     )
 
@@ -304,17 +319,15 @@ async def recipe_price_command(
         )
     )
     summary_lines.append(
-        (
-            f" • Стоимость создания: {blueprint_creation_cost:,.2f}"
-            if blueprint_creation_cost is not None
-            else " • Стоимость создания: не задана (не учтена)"
+        _format_optional_cost(
+            "Стоимость создания",
+            blueprint_creation_cost,
+            "не задана (не учтена)",
         )
     )
     summary_lines.append(
-        (
-            f" • Стоимость покупки: {blueprint_cost:,.2f}"
-            if blueprint_cost is not None
-            else " • Стоимость покупки: не задана (не учтена)"
+        _format_optional_cost(
+            "Стоимость покупки", blueprint_cost, "не задана (не учтена)"
         )
     )
 
@@ -400,7 +413,7 @@ async def resource_price_autocomplete(
 
 
 @bot.tree.command(
-    name="set_recipe_blueprint_components",
+    name="set_blueprint_components",
     description="Задать ресурсы для чертежа рецепта",
 )
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -409,28 +422,31 @@ async def resource_price_autocomplete(
     table="Текстовая таблица с ресурсами чертежа",
     file="Текстовый файл с таблицей чертежа",
 )
-async def set_recipe_blueprint_components_command(
+async def set_blueprint_components_command(
     interaction: discord.Interaction,
     recipe_name: str,
     table: Optional[str] = None,
     file: Optional[discord.Attachment] = None,
 ) -> None:
     logger.info(
-        "Получена команда set_recipe_blueprint_components: пользователь=%s, рецепт=%s",
+        "Получена команда set_blueprint_components: пользователь=%s, рецепт=%s",
         interaction.user,
         recipe_name,
     )
     await interaction.response.defer(thinking=True)
 
-    table_text = table
-    if table_text is None:
-        attachment_text = await read_attachment_content(file)
-        table_text = attachment_text
-    if table_text is None:
+    async def notify_missing_blueprint_table() -> None:
         await interaction.followup.send(
             "Не найден текст ресурсов чертежа. Укажите таблицу в команде или приложите файл.",
             ephemeral=False,
         )
+
+    table_text = await _read_table_input(
+        table,
+        file,
+        notify_missing_blueprint_table,
+    )
+    if table_text is None:
         return
 
     try:
@@ -462,8 +478,8 @@ async def set_recipe_blueprint_components_command(
     )
 
 
-@set_recipe_blueprint_components_command.autocomplete("recipe_name")
-async def set_recipe_blueprint_components_autocomplete(
+@set_blueprint_components_command.autocomplete("recipe_name")
+async def set_blueprint_components_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
     del interaction
@@ -532,7 +548,7 @@ async def set_recipe_blueprint_cost_autocomplete(
 
 
 @bot.tree.command(
-    name="set_recipe_blueprint_creation_cost",
+    name="set_blueprint_creation_cost",
     description="Установить стоимость создания чертежа",
 )
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -540,13 +556,13 @@ async def set_recipe_blueprint_cost_autocomplete(
     recipe_name="Название рецепта",
     value="Стоимость создания чертежа",
 )
-async def set_recipe_blueprint_creation_cost_command(
+async def set_blueprint_creation_cost_command(
     interaction: discord.Interaction,
     recipe_name: str,
     value: float,
 ) -> None:
     logger.info(
-        "Получена команда set_recipe_blueprint_creation_cost: пользователь=%s, рецепт=%s, стоимость=%s",
+        "Получена команда set_blueprint_creation_cost: пользователь=%s, рецепт=%s, стоимость=%s",
         interaction.user,
         recipe_name,
         value,
@@ -582,8 +598,8 @@ async def set_recipe_blueprint_creation_cost_command(
     )
 
 
-@set_recipe_blueprint_creation_cost_command.autocomplete("recipe_name")
-async def set_recipe_blueprint_creation_cost_autocomplete(
+@set_blueprint_creation_cost_command.autocomplete("recipe_name")
+async def set_blueprint_creation_cost_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
     del interaction
