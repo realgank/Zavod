@@ -95,10 +95,59 @@ async def _migration_3_add_ship_type_support(conn: aiosqlite.Connection) -> None
     )
 
 
+async def _migration_4_add_recipe_cost_fields(conn: aiosqlite.Connection) -> None:
+    """Add blueprint and creation cost fields to recipes."""
+
+    logger.info(
+        "Выполняю миграцию схемы #4: добавление стоимостей чертежа и создания"
+    )
+    cursor = await conn.execute("PRAGMA table_info(recipes)")
+    columns = [row["name"] for row in await cursor.fetchall()]
+    await cursor.close()
+
+    if "blueprint_cost" not in columns:
+        logger.info("Добавляю столбец blueprint_cost в таблицу recipes")
+        await conn.execute("ALTER TABLE recipes ADD COLUMN blueprint_cost REAL")
+    else:
+        logger.info(
+            "Столбец blueprint_cost уже существует, пропускаю добавление"
+        )
+
+    if "creation_cost" not in columns:
+        logger.info("Добавляю столбец creation_cost в таблицу recipes")
+        await conn.execute("ALTER TABLE recipes ADD COLUMN creation_cost REAL")
+    else:
+        logger.info(
+            "Столбец creation_cost уже существует, пропускаю добавление"
+        )
+
+
+async def _migration_5_add_blueprint_components_table(
+    conn: aiosqlite.Connection,
+) -> None:
+    """Introduce a table for blueprint resource requirements."""
+
+    logger.info(
+        "Выполняю миграцию схемы #5: создание таблицы компонентов чертежей"
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recipe_blueprint_components (
+            recipe_id INTEGER NOT NULL,
+            resource_name TEXT NOT NULL,
+            quantity REAL NOT NULL,
+            FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+
 MIGRATIONS: dict[int, Migration] = {
     1: _migration_1_initialise_schema_version,
     2: _migration_2_add_recipe_status,
     3: _migration_3_add_ship_type_support,
+    4: _migration_4_add_recipe_cost_fields,
+    5: _migration_5_add_blueprint_components_table,
 }
 
 CURRENT_SCHEMA_VERSION = max(MIGRATIONS.keys(), default=0)
@@ -201,10 +250,19 @@ class Database:
                 name TEXT NOT NULL UNIQUE,
                 output_quantity REAL NOT NULL DEFAULT 1,
                 is_temporary INTEGER NOT NULL DEFAULT 0,
-                ship_type TEXT
+                ship_type TEXT,
+                blueprint_cost REAL,
+                creation_cost REAL
             );
 
             CREATE TABLE IF NOT EXISTS recipe_components (
+                recipe_id INTEGER NOT NULL,
+                resource_name TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS recipe_blueprint_components (
                 recipe_id INTEGER NOT NULL,
                 resource_name TEXT NOT NULL,
                 quantity REAL NOT NULL,
@@ -426,6 +484,128 @@ class Database:
                 logger.warning("Рецепт '%s' не найден для удаления", name)
             return deleted
 
+    async def set_recipe_blueprint_cost(
+        self, name: str, cost: Optional[Decimal]
+    ) -> None:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        async with self._lock:
+            logger.info(
+                "Обновляю стоимость чертежа рецепта '%s': %s", name, cost
+            )
+            cursor = await self._conn.execute(
+                "UPDATE recipes SET blueprint_cost = ? WHERE name = ?",
+                (float(cost) if cost is not None else None, name),
+            )
+            await self._conn.commit()
+            updated = cursor.rowcount > 0
+            await cursor.close()
+            if not updated:
+                logger.warning(
+                    "Не удалось обновить стоимость чертежа: рецепт '%s' не найден",
+                    name,
+                )
+                raise RecipeNotFoundError(
+                    f"Recipe '{name}' is not defined"
+                )
+
+    async def set_recipe_creation_cost(
+        self, name: str, cost: Optional[Decimal]
+    ) -> None:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        async with self._lock:
+            logger.info(
+                "Обновляю цену создания рецепта '%s': %s", name, cost
+            )
+            cursor = await self._conn.execute(
+                "UPDATE recipes SET creation_cost = ? WHERE name = ?",
+                (float(cost) if cost is not None else None, name),
+            )
+            await self._conn.commit()
+            updated = cursor.rowcount > 0
+            await cursor.close()
+            if not updated:
+                logger.warning(
+                    "Не удалось обновить цену создания: рецепт '%s' не найден",
+                    name,
+                )
+                raise RecipeNotFoundError(
+                    f"Recipe '{name}' is not defined"
+                )
+
+    async def set_recipe_blueprint_components(
+        self, name: str, components: Iterable[RecipeComponent]
+    ) -> None:
+        if self._conn is None:
+            raise RuntimeError("Database connection is not initialised")
+
+        async with self._lock:
+            materialised_components = list(components)
+            logger.info(
+                "Обновляю компоненты чертежа для рецепта '%s' (%s компонентов)",
+                name,
+                len(materialised_components),
+            )
+
+            cursor = await self._conn.execute(
+                "SELECT id FROM recipes WHERE name = ?",
+                (name,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                logger.warning(
+                    "Не удалось обновить компоненты чертежа: рецепт '%s' не найден",
+                    name,
+                )
+                raise RecipeNotFoundError(f"Recipe '{name}' is not defined")
+
+            recipe_id = row["id"]
+            await self._conn.execute(
+                "DELETE FROM recipe_blueprint_components WHERE recipe_id = ?",
+                (recipe_id,),
+            )
+
+            for component in materialised_components:
+                logger.debug(
+                    "Добавляю компонент чертежа: рецепт=%s ресурс=%s количество=%s цена=%s",
+                    name,
+                    component.resource_name,
+                    component.quantity,
+                    component.unit_price,
+                )
+                await self._conn.execute(
+                    """
+                    INSERT INTO recipe_blueprint_components(
+                        recipe_id,
+                        resource_name,
+                        quantity
+                    )
+                    VALUES(?, ?, ?)
+                    """,
+                    (recipe_id, component.resource_name, float(component.quantity)),
+                )
+                await self._conn.execute(
+                    """
+                    INSERT INTO resources(name, unit_price)
+                    VALUES(?, ?)
+                    ON CONFLICT(name) DO UPDATE SET
+                        unit_price = excluded.unit_price,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (component.resource_name, float(component.unit_price)),
+                )
+
+            await self._conn.commit()
+            logger.info(
+                "Компоненты чертежа для рецепта '%s' обновлены (%s штук)",
+                name,
+                len(materialised_components),
+            )
+
     async def get_recipe(self, name: str) -> Optional[dict[str, Any]]:
         if self._conn is None:
             raise RuntimeError("Database connection is not initialised")
@@ -433,7 +613,14 @@ class Database:
 
         cursor = await self._conn.execute(
             """
-            SELECT id, name, output_quantity, is_temporary, ship_type
+            SELECT
+                id,
+                name,
+                output_quantity,
+                is_temporary,
+                ship_type,
+                blueprint_cost,
+                creation_cost
             FROM recipes
             WHERE name = ?
             """,
@@ -457,13 +644,30 @@ class Database:
         )
         components = [dict(resource_name=r["resource_name"], quantity=r["quantity"]) for r in await cursor.fetchall()]
         await cursor.close()
+        cursor = await self._conn.execute(
+            """
+            SELECT resource_name, quantity
+            FROM recipe_blueprint_components
+            WHERE recipe_id = ?
+            ORDER BY resource_name
+            """,
+            (row["id"],),
+        )
+        blueprint_components = [
+            dict(resource_name=r["resource_name"], quantity=r["quantity"])
+            for r in await cursor.fetchall()
+        ]
+        await cursor.close()
         recipe_data = {
             "id": row["id"],
             "name": row["name"],
             "output_quantity": row["output_quantity"],
             "is_temporary": bool(row["is_temporary"]),
             "ship_type": (row["ship_type"] or None),
+            "blueprint_cost": row["blueprint_cost"],
+            "creation_cost": row["creation_cost"],
             "components": components,
+            "blueprint_components": blueprint_components,
         }
         logger.debug(
             "Рецепт '%s' получен: выход=%s, компонентов=%s",
@@ -862,7 +1066,9 @@ class Database:
         )
 
         async def resource_cost(
-            resource_name: str, visiting: set[str]
+            resource_name: str,
+            visiting: set[str],
+            quantity_multiplier: Decimal,
         ) -> tuple[Decimal, dict[str, tuple[Decimal, Decimal]]]:
             if resource_name in visiting:
                 raise CircularRecipeReferenceError(
@@ -876,7 +1082,9 @@ class Database:
                 )
                 visiting.add(resource_name)
                 cost_per_run, nested_breakdown = await recipe_cost(
-                    nested_recipe, visiting
+                    nested_recipe,
+                    visiting,
+                    quantity_multiplier,
                 )
                 visiting.remove(resource_name)
                 output_quantity = Decimal(str(nested_recipe["output_quantity"]))
@@ -905,7 +1113,9 @@ class Database:
             return unit_price, {resource_name: (Decimal("1"), unit_price)}
 
         async def recipe_cost(
-            recipe: dict[str, Any], visiting: set[str]
+            recipe: dict[str, Any],
+            visiting: set[str],
+            quantity_multiplier: Decimal,
         ) -> tuple[Decimal, dict[str, tuple[Decimal, Decimal]]]:
             logger.debug(
                 "Начинаю расчёт стоимости рецепта '%s' для %s компонентов",
@@ -915,11 +1125,17 @@ class Database:
             total = Decimal("0")
             breakdown: dict[str, tuple[Decimal, Decimal]] = {}
             for component in recipe["components"]:
-                component_quantity = Decimal(str(component["quantity"])) * multiplier
+                component_quantity = (
+                    Decimal(str(component["quantity"])) * quantity_multiplier
+                )
                 (
                     component_cost,
                     component_breakdown,
-                ) = await resource_cost(component["resource_name"], visiting)
+                ) = await resource_cost(
+                    component["resource_name"],
+                    visiting,
+                    quantity_multiplier,
+                )
                 total_cost = component_quantity * component_cost
                 total += total_cost
                 logger.debug(
@@ -942,10 +1158,47 @@ class Database:
             return total, breakdown
 
         total_run_cost, aggregated_breakdown = await recipe_cost(
-            base_recipe, {recipe_name}
+            base_recipe,
+            {recipe_name},
+            multiplier,
         )
         output_quantity = Decimal(str(base_recipe["output_quantity"]))
         unit_cost = total_run_cost / output_quantity
+        blueprint_components_data = base_recipe.get("blueprint_components") or []
+        blueprint_components_cost = Decimal("0")
+        blueprint_aggregated_breakdown: dict[str, tuple[Decimal, Decimal]] = {}
+        if blueprint_components_data:
+            blueprint_recipe = {
+                "name": f"{recipe_name} (чертеж)",
+                "components": blueprint_components_data,
+                "output_quantity": Decimal("1"),
+            }
+            blueprint_components_cost, blueprint_aggregated_breakdown = await recipe_cost(
+                blueprint_recipe,
+                {recipe_name},
+                Decimal("1"),
+            )
+        raw_blueprint_cost = base_recipe.get("blueprint_cost")
+        raw_creation_cost = base_recipe.get("creation_cost")
+        blueprint_cost: Optional[Decimal]
+        creation_cost: Optional[Decimal]
+        if raw_blueprint_cost is None:
+            blueprint_cost = None
+        else:
+            blueprint_cost = Decimal(str(raw_blueprint_cost))
+        if raw_creation_cost is None:
+            creation_cost = None
+        else:
+            creation_cost = Decimal(str(raw_creation_cost))
+        total_with_additions = total_run_cost + blueprint_components_cost
+        if blueprint_cost is not None:
+            total_with_additions += blueprint_cost
+        if creation_cost is not None:
+            total_with_additions += creation_cost
+        if output_quantity > 0:
+            unit_cost_with_additions = total_with_additions / output_quantity
+        else:
+            unit_cost_with_additions = total_with_additions
         logger.info(
             "Стоимость рецепта '%s': цикл=%s, единица=%s", recipe_name, total_run_cost, unit_cost
         )
@@ -966,6 +1219,17 @@ class Database:
             }
             for name, (quantity, unit_price) in sorted(aggregated_breakdown.items())
         ]
+        blueprint_components_breakdown = [
+            {
+                "resource_name": name,
+                "quantity": quantity,
+                "unit_cost": unit_price,
+                "total_cost": unit_price * quantity,
+            }
+            for name, (quantity, unit_price) in sorted(
+                blueprint_aggregated_breakdown.items()
+            )
+        ]
         return {
             "efficiency": efficiency,
             "run_cost": total_run_cost,
@@ -974,6 +1238,12 @@ class Database:
             "components": components_breakdown,
             "ship_type": base_recipe.get("ship_type"),
             "efficiency_source": efficiency_source,
+            "blueprint_cost": blueprint_cost,
+            "creation_cost": creation_cost,
+            "total_with_additions": total_with_additions,
+            "unit_cost_with_additions": unit_cost_with_additions,
+            "blueprint_components": blueprint_components_breakdown,
+            "blueprint_components_cost": blueprint_components_cost,
         }
 
 
